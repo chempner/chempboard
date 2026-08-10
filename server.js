@@ -1495,6 +1495,14 @@ function uniqueTextValues(values, maxLength = 240) {
   return rows;
 }
 
+function networkIntegrationSiteKey(site) {
+  return asText(site?.id || site?._id || site?.siteId || site?.site_id || site?.name || site?.internalReference || '', 180);
+}
+
+function networkIntegrationSiteName(site) {
+  return asText(site?.name || site?.meta?.name || site?.siteName || site?.site_name || site?.displayName || site?.description || '', 160);
+}
+
 function slimUniFiHost(host) {
   const id = asText(host?.id || host?.hostId || host?.hardwareId || '', 220);
   if (!id) return null;
@@ -1919,6 +1927,10 @@ async function collectUniFi() {
       const total = firstFiniteNumber([
         response.json?.total,
         response.json?.count,
+        response.json?.totalCount,
+        response.json?.data?.total,
+        response.json?.data?.count,
+        response.json?.data?.totalCount,
         response.json?.pagination?.total,
         response.json?.meta?.total,
       ], NaN);
@@ -1936,25 +1948,89 @@ async function collectUniFi() {
     };
   }
 
+  async function requestNetworkIntegrationSites(baseUrlForRequest, pathname, pathForLabel) {
+    const response = await requestUniFiJson(resolveUrl(baseUrlForRequest, pathname), {
+      label: 'UniFi Network sites',
+      maxBytes: 4 * 1024 * 1024,
+    });
+    const sites = unifiData(response.json);
+    return {
+      sites,
+      endpoint: { name: 'network sites', ok: true, path: pathForLabel || pathname, count: sites.length },
+    };
+  }
+
   async function collectNetworkIntegrationClients() {
     if (!apiKey) return { clients: [], endpoint: null };
-    const siteIds = uniqueTextValues([unifiSiteId, unifiSite], 180);
-    if (!siteIds.length) return { clients: [], endpoint: null };
+    const configuredSiteIds = uniqueTextValues([unifiSiteId, unifiSite], 180);
+    const siteRows = [];
+    const endpoints = [];
 
     let lastError = null;
     if (unifiHostId) {
       for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
-        for (const siteId of siteIds) {
+        for (const connectorPrefix of ['network', 'proxy/network']) {
           for (const integrationRoot of ['integration', 'integrations']) {
-            const basePath = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/proxy/network/${integrationRoot}/v1/sites/${encodeURIComponent(siteId)}/clients`;
+            const sitesPath = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/${connectorPrefix}/${integrationRoot}/v1/sites`;
             try {
-              return await requestNetworkIntegrationClientPages(
-                managerBaseUrl,
-                (offset, limit) => `${basePath}?limit=${limit}&offset=${offset}`,
-                `${managerBaseUrl}${basePath}`,
-              );
+              const result = await requestNetworkIntegrationSites(managerBaseUrl, sitesPath, `${managerBaseUrl}${sitesPath}`);
+              siteRows.push(...result.sites);
+              endpoints.push(result.endpoint);
             } catch (err) {
               lastError = err;
+            }
+          }
+        }
+      }
+    }
+
+    for (const prefix of parseUniFiPrefixes()) {
+      const prefixClean = prefix.replace(/\/+$/, '');
+      for (const integrationRoot of ['integration', 'integrations']) {
+        const sitesPath = `${prefixClean}/${integrationRoot}/v1/sites`.replace(/^\/?/, '/');
+        try {
+          const result = await requestNetworkIntegrationSites(baseUrl, sitesPath, sitesPath);
+          siteRows.push(...result.sites);
+          endpoints.push(result.endpoint);
+        } catch (err) {
+          lastError = err;
+        }
+      }
+    }
+
+    const siteCandidates = [...configuredSiteIds];
+    const selectedNames = uniqueTextValues([unifiSite, 'default'], 160).map(value => value.toLowerCase());
+    for (const site of siteRows) {
+      const id = networkIntegrationSiteKey(site);
+      const name = networkIntegrationSiteName(site);
+      if (!id) continue;
+      if (!name || selectedNames.includes(name.toLowerCase()) || id === unifiSiteId || id === unifiSite) siteCandidates.push(id);
+    }
+    for (const site of siteRows) {
+      const id = networkIntegrationSiteKey(site);
+      if (id) siteCandidates.push(id);
+    }
+
+    const siteIds = uniqueTextValues(siteCandidates, 180);
+    const emptySuccesses = [];
+    if (unifiHostId) {
+      for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
+        for (const siteId of siteIds) {
+          for (const connectorPrefix of ['network', 'proxy/network']) {
+            for (const integrationRoot of ['integration', 'integrations']) {
+              const basePath = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/${connectorPrefix}/${integrationRoot}/v1/sites/${encodeURIComponent(siteId)}/clients`;
+              try {
+                const result = await requestNetworkIntegrationClientPages(
+                  managerBaseUrl,
+                  (offset, limit) => `${basePath}?limit=${limit}&offset=${offset}`,
+                  `${managerBaseUrl}${basePath}`,
+                );
+                endpoints.push(result.endpoint);
+                if (result.clients.length) return { ...result, endpoints };
+                emptySuccesses.push(result);
+              } catch (err) {
+                lastError = err;
+              }
             }
           }
         }
@@ -1967,11 +2043,14 @@ async function collectUniFi() {
         for (const integrationRoot of ['integration', 'integrations']) {
           const basePath = `${prefixClean}/${integrationRoot}/v1/sites/${encodeURIComponent(siteId)}/clients`.replace(/^\/?/, '/');
           try {
-            return await requestNetworkIntegrationClientPages(
+            const result = await requestNetworkIntegrationClientPages(
               baseUrl,
               (offset, limit) => `${basePath}?limit=${limit}&offset=${offset}`,
               basePath,
             );
+            endpoints.push(result.endpoint);
+            if (result.clients.length) return { ...result, endpoints };
+            emptySuccesses.push(result);
           } catch (err) {
             lastError = err;
           }
@@ -1979,8 +2058,14 @@ async function collectUniFi() {
       }
     }
 
+    if (emptySuccesses.length) {
+      const best = emptySuccesses[0];
+      return { ...best, endpoints };
+    }
+
     return {
       clients: [],
+      endpoints: endpoints.length ? endpoints : undefined,
       endpoint: {
         name: 'network clients',
         ok: false,
@@ -2033,8 +2118,8 @@ async function collectUniFi() {
   const localDevices = unifiData(settledValue(calls[2], {}).json || settledValue(calls[2], {})).map(slimUnifiDevice);
   const devices = unifiHostId && siteManagerDeviceResult.endpoint?.ok ? siteManagerDeviceResult.devices : localDevices;
   const legacyClients = unifiData(settledValue(calls[3], {}).json || settledValue(calls[3], {})).map(slimUnifiClient);
-  const clients = networkClientResult.endpoint?.ok ? networkClientResult.clients : legacyClients;
-  const clientSource = networkClientResult.endpoint?.ok ? 'network integration' : 'legacy';
+  const clients = networkClientResult.clients?.length ? networkClientResult.clients : legacyClients;
+  const clientSource = networkClientResult.clients?.length ? 'network integration' : legacyClients.length ? 'legacy' : networkClientResult.endpoint?.ok ? 'network integration' : 'legacy';
   const events = unifiData(settledValue(calls[4], {}).json || settledValue(calls[4], {})).map(slimUnifiEvent).slice(0, 120);
   const alarms = unifiData(settledValue(calls[5], {}).json || settledValue(calls[5], {})).map(slimUnifiEvent).slice(0, 120);
   const dataEndpoints = names.map((name, index) => endpointResult(name, calls[index]));
@@ -2042,7 +2127,7 @@ async function collectUniFi() {
     ...siteResult.endpoints,
     ...dataEndpoints,
     ...(siteManagerDeviceResult.endpoint ? [siteManagerDeviceResult.endpoint] : []),
-    ...(networkClientResult.endpoint ? [networkClientResult.endpoint] : []),
+    ...(networkClientResult.endpoints?.length ? networkClientResult.endpoints : networkClientResult.endpoint ? [networkClientResult.endpoint] : []),
   ];
   const ok = endpoints.some(endpoint => endpoint.ok);
   const overview = summarizeUniFiOverview({ devices, clients, health, events, alarms, endpoints, sysinfo, clientSource });

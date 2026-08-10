@@ -1433,7 +1433,8 @@
 
     function endpointRow(endpoint) {
       const meta = endpoint.count !== undefined ? `${endpoint.count} rows` : endpoint.status ? `HTTP ${endpoint.status}` : '';
-      return tableRow(endpoint.name, endpoint.ok ? 'OK' : endpoint.error || 'Failed', meta);
+      const detail = endpoint.ok ? ['OK', endpoint.path].filter(Boolean).join(' - ') : endpoint.error || 'Failed';
+      return tableRow(endpoint.name, detail, meta);
     }
 
     function tableRow(title, detail, meta) {
