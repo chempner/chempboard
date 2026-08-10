@@ -1038,6 +1038,8 @@
 
     function renderUniFi() {
       const unifi = state.data.unifi || {};
+      const overview = unifi.overview || {};
+      const endpointChecks = overview.endpointChecks || {};
       if (!unifi.configured) return `<div class="empty-state">${escapeHtml(unifi.error || 'UniFi Network is not configured.')}</div>`;
       return `
         <div class="page-stack">
@@ -1054,9 +1056,13 @@
             </label>
           </section>
           <div class="stats-grid">
-            ${statCard('Clients', String(unifi.clients?.total || 0), `Site ${unifi.site || '-'}`, 'cyan')}
-            ${statCard('Devices', String(unifi.devices?.total || 0), `${unifi.devices?.offline || 0} offline`, (unifi.devices?.offline || 0) ? 'amber' : 'green')}
+            ${statCard('Clients', String(unifi.clients?.total || 0), `${unifi.clients?.source || overview.clientSource || 'unknown'} source`, 'cyan')}
+            ${statCard('Devices', String(unifi.devices?.total || 0), `${overview.devicesOnline ?? '-'} online - ${unifi.devices?.offline || 0} offline`, (unifi.devices?.offline || 0) ? 'amber' : 'green')}
+            ${statCard('Client traffic', formatTrafficPair(overview.clientTraffic), 'visible active clients', 'blue')}
+            ${statCard('Endpoints', `${endpointChecks.ok ?? 0}/${endpointChecks.total ?? 0}`, `${endpointChecks.failed ?? 0} failed`, endpointChecks.failed ? 'amber' : 'green')}
             ${statCard('Events', String((unifi.events || []).length), `${(unifi.alarms || []).length} alarms`, (unifi.alarms || []).length ? 'amber' : 'blue')}
+            ${statCard('Networks', String((overview.clientNetworks || []).length), topCountText(overview.clientNetworks), 'cyan')}
+            ${statCard('Device mix', String((overview.deviceTypes || []).length), topCountText(overview.deviceTypes), 'green')}
             ${statCard('Controller', unifi.ok ? 'Online' : 'Check', unifi.baseUrl || unifi.error || '-', unifi.ok ? 'green' : 'red')}
           </div>
           <div class="split-layout">
@@ -1072,6 +1078,18 @@
                 ${(unifi.endpoints || []).map(endpointRow).join('')}
               </div>
             </section>
+          </div>
+          <div class="split-layout">
+            ${countPanel('Device overview', `${overview.devicesOnline ?? 0} online - ${overview.devicesOffline ?? 0} offline`, overview.deviceTypes, 'No device type data.')}
+            ${countPanel('Client networks', `${unifi.clients?.total || 0} active clients`, overview.clientNetworks, 'No client network data.')}
+          </div>
+          <div class="split-layout">
+            ${countPanel('Client radios and SSIDs', topCountText(overview.clientSsids) || 'Connection mix', [...(overview.clientRadios || []), ...(overview.clientSsids || []).map(item => ({ ...item, name: `SSID: ${item.name}` }))], 'No client radio data.')}
+            ${countPanel('Firmware versions', overview.controllerVersion ? `Controller ${overview.controllerVersion}` : 'Controller version unknown', overview.deviceVersions, 'No firmware version data.')}
+          </div>
+          <div class="split-layout">
+            ${countPanel('Health summary', topCountText(overview.healthStatuses) || 'Subsystem states', overview.healthSubsystems, 'No health summary.')}
+            ${countPanel('Event sources', `${(unifi.events || []).length} events - ${(unifi.alarms || []).length} alarms`, [...(overview.eventSources || []), ...(overview.alarmSources || []).map(item => ({ ...item, name: `Alarm: ${item.name}` }))], 'No event source data.')}
           </div>
           <section class="panel">
             <div class="panel-heading"><div><h2>Devices</h2><p>${unifi.devices?.total || 0} devices</p></div></div>
@@ -1091,6 +1109,26 @@
           </div>
         </div>
       `;
+    }
+
+    function topCountText(rows) {
+      return (rows || []).slice(0, 2).map(item => `${item.name}: ${item.count}`).join(' - ');
+    }
+
+    function formatTrafficPair(traffic = {}) {
+      const rx = Number(traffic.rxBytes || 0);
+      const tx = Number(traffic.txBytes || 0);
+      if (!rx && !tx) return '-';
+      return `${formatBytes(rx)} / ${formatBytes(tx)}`;
+    }
+
+    function countPanel(title, subtitle, rows, emptyText) {
+      return `<section class="panel">
+        <div class="panel-heading"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle || '')}</p></div></div>
+        <div class="table">
+          ${(rows || []).map(item => tableRow(item.name, `${item.count} ${item.count === 1 ? 'item' : 'items'}`, '')).join('') || `<div class="empty-state">${escapeHtml(emptyText || 'No data.')}</div>`}
+        </div>
+      </section>`;
     }
 
     function unifiSiteKey(name, hostId, siteId) {
@@ -1394,7 +1432,8 @@
     }
 
     function endpointRow(endpoint) {
-      return tableRow(endpoint.name, endpoint.ok ? 'OK' : endpoint.error || 'Failed', endpoint.status ? `HTTP ${endpoint.status}` : '');
+      const meta = endpoint.count !== undefined ? `${endpoint.count} rows` : endpoint.status ? `HTTP ${endpoint.status}` : '';
+      return tableRow(endpoint.name, endpoint.ok ? 'OK' : endpoint.error || 'Failed', meta);
     }
 
     function tableRow(title, detail, meta) {
