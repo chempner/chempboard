@@ -1455,8 +1455,8 @@ function siteManagerApiBaseUrl(baseUrl) {
 
 function siteManagerApiBaseUrls(baseUrl) {
   const override = cleanBaseUrl(process.env.UNIFI_SITE_MANAGER_URL || '');
+  if (override) return [override];
   const urls = [
-    override,
     siteManagerApiBaseUrl(baseUrl),
     'https://api.ui.com',
   ].filter(Boolean);
@@ -1495,19 +1495,34 @@ function uniqueTextValues(values, maxLength = 240) {
   return rows;
 }
 
+function normalizeTextKey(value) {
+  return asText(value, 240).trim().toLowerCase();
+}
+
+function looksLikeUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(asText(value, 180));
+}
+
 function networkIntegrationSiteKey(site) {
   return asText(site?.id || site?._id || site?.siteId || site?.site_id || site?.name || site?.internalReference || '', 180);
 }
 
-function networkIntegrationSiteCandidates(site) {
+function networkIntegrationSiteIds(site) {
   return uniqueTextValues([
     site?.id,
     site?._id,
     site?.siteId,
     site?.site_id,
+  ], 180);
+}
+
+function networkIntegrationLegacyRefs(site) {
+  return uniqueTextValues([
     site?.internalReference,
-    site?.name,
     site?.shortname,
+    site?.name,
+    site?.siteName,
+    site?.site_name,
     site?.meta?.name,
   ], 180);
 }
@@ -1542,6 +1557,32 @@ function slimUniFiHost(host) {
   };
 }
 
+function slimSiteCounts(site) {
+  const counts = nestedValue(site, ['statistics.counts', 'stats.counts', 'counts']);
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return {};
+  const wanted = [
+    'totalClient',
+    'wifiClient',
+    'wiredClient',
+    'guestClient',
+    'vpnClient',
+    'totalDevice',
+    'offlineDevice',
+    'gatewayDevice',
+    'wifiDevice',
+    'wiredDevice',
+    'lanConfiguration',
+    'wanConfiguration',
+    'criticalNotification',
+  ];
+  const result = {};
+  for (const key of wanted) {
+    const value = Number(counts[key]);
+    if (Number.isFinite(value)) result[key] = value;
+  }
+  return result;
+}
+
 function uniFiSiteKey(site) {
   const hostId = asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220);
   const siteId = asText(site?.siteId || site?.site_id || site?._id || site?.id || site?.meta?.id || '', 180);
@@ -1573,6 +1614,7 @@ function slimUniFiSite(site) {
     siteId,
     hostId,
     hostName,
+    counts: slimSiteCounts(site),
     role: asText(site?.role || site?.permission || '', 80),
     source: asText(site?.source || (site?.meta ? 'site-manager' : 'network'), 80),
   };
@@ -1708,10 +1750,42 @@ function countBy(rows, selector, fallback = 'Unknown') {
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
-function summarizeUniFiOverview({ devices, clients, health, events, alarms, endpoints, sysinfo, clientSource }) {
+function findSelectedUniFiSite(sites, selectedSiteKey, siteName, hostId, siteId) {
+  const expectedKey = uniFiSiteKey({ name: siteName, hostId, siteId });
+  const targetName = normalizeTextKey(siteName);
+  return (sites || []).find(site => site.key === selectedSiteKey)
+    || (sites || []).find(site => site.key === expectedKey)
+    || (sites || []).find(site => site.hostId === hostId && site.siteId === siteId && normalizeTextKey(site.name) === targetName)
+    || (sites || []).find(site => site.hostId === hostId && normalizeTextKey(site.name) === targetName)
+    || (sites || []).find(site => normalizeTextKey(site.name) === targetName)
+    || null;
+}
+
+function summarizeSiteClientCounts(site) {
+  const counts = site?.counts || {};
+  const wifi = firstFiniteNumber([counts.wifiClient], 0);
+  const wired = firstFiniteNumber([counts.wiredClient], 0);
+  const vpn = firstFiniteNumber([counts.vpnClient], 0);
+  const guest = firstFiniteNumber([counts.guestClient], 0);
+  const totalFromCounts = firstFiniteNumber([counts.totalClient], NaN);
+  const inferredTotal = wifi + wired + vpn;
+  const total = Number.isFinite(totalFromCounts) ? totalFromCounts : inferredTotal;
+  const rows = [
+    { name: 'Wi-Fi', count: wifi },
+    { name: 'Wired', count: wired },
+    { name: 'VPN', count: vpn },
+    { name: 'Guest', count: guest },
+  ].filter(item => item.count > 0);
+  if (total > inferredTotal) rows.push({ name: 'Other', count: total - inferredTotal });
+  return { total, wifi, wired, vpn, guest, rows };
+}
+
+function summarizeUniFiOverview({ devices, clients, health, events, alarms, endpoints, sysinfo, clientSource, siteClientSummary }) {
   const onlineDevices = (devices || []).filter(device => device.state === 1 || device.state === '1').length;
   const totalRxBytes = (clients || []).reduce((sum, client) => sum + firstFiniteNumber([client.rxBytes]), 0);
   const totalTxBytes = (clients || []).reduce((sum, client) => sum + firstFiniteNumber([client.txBytes]), 0);
+  const clientRows = (clients || []).length;
+  const summaryRows = siteClientSummary?.rows || [];
   return {
     clientSource,
     controllerVersion: asText(sysinfo?.version || sysinfo?.build || sysinfo?.system_version || '', 80),
@@ -1720,8 +1794,9 @@ function summarizeUniFiOverview({ devices, clients, health, events, alarms, endp
     deviceTypes: countBy(devices, device => device.type || device.model).slice(0, 8),
     deviceVersions: countBy(devices, device => device.version).slice(0, 8),
     clientNetworks: countBy(clients, client => client.network || client.essid || client.radio).slice(0, 8),
-    clientRadios: countBy(clients, client => client.radio || (client.essid ? 'Wireless' : 'Wired')).slice(0, 8),
+    clientRadios: clientRows ? countBy(clients, client => client.radio || (client.essid ? 'Wireless' : 'Wired')).slice(0, 8) : summaryRows,
     clientSsids: countBy(clients, client => client.essid).filter(item => item.name !== 'Unknown').slice(0, 8),
+    siteClientSummary,
     clientTraffic: { rxBytes: totalRxBytes, txBytes: totalTxBytes },
     healthStatuses: countBy(health, row => row.status || row.state || row.subsystem).slice(0, 8),
     healthSubsystems: countBy(health, row => row.subsystem || row.name || row.status).slice(0, 8),
@@ -1867,38 +1942,76 @@ async function collectUniFi() {
     }
 
     if (apiKey) {
-      for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
-        const hostsById = new Map();
-        try {
-          const pathname = '/ea/hosts';
-          const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathname), {
-            label: `UniFi ${pathname}`,
+      async function requestSiteManagerRows(managerBaseUrl, pathnameBase, label, paged = false) {
+        if (!paged) {
+          const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathnameBase), {
+            label,
             maxBytes: 4 * 1024 * 1024,
           });
-          const hosts = unifiData(response.json).map(slimUniFiHost).filter(Boolean);
-          for (const host of hosts) hostsById.set(host.id, host);
-          endpoints.push({ name: 'site manager hosts', ok: true, path: `${managerBaseUrl}${pathname}`, count: hosts.length });
-        } catch (err) {
-          lastError = err;
-          endpoints.push({ name: 'site manager hosts', ok: false, path: `${managerBaseUrl}/ea/hosts`, error: err.message, status: err.status || null });
+          return {
+            rows: unifiData(response.json),
+            endpoint: { name: label, ok: true, path: `${managerBaseUrl}${pathnameBase}`, count: unifiData(response.json).length },
+          };
         }
 
-        try {
-          const pathname = '/ea/sites';
+        const pageSize = 200;
+        const collected = [];
+        let nextToken = '';
+        let lastPath = pathnameBase;
+        for (let page = 0; page < 5; page += 1) {
+          const query = new URLSearchParams({ pageSize: String(pageSize) });
+          if (nextToken) query.set('nextToken', nextToken);
+          const pathname = `${pathnameBase}?${query.toString()}`;
+          lastPath = pathname;
           const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathname), {
-            label: `UniFi ${pathname}`,
+            label,
             maxBytes: 4 * 1024 * 1024,
           });
-          const managerSites = unifiData(response.json).map(site => {
-            const hostId = asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220);
-            const host = hostsById.get(hostId);
-            return { ...site, hostName: site?.hostName || site?.hostLabel || host?.label || '', source: 'site-manager' };
-          });
-          rows.push(...managerSites);
-          endpoints.push({ name: 'site manager sites', ok: true, path: `${managerBaseUrl}${pathname}`, count: managerSites.length });
-        } catch (err) {
-          lastError = err;
-          endpoints.push({ name: 'site manager sites', ok: false, path: `${managerBaseUrl}/ea/sites`, error: err.message, status: err.status || null });
+          const pageRows = unifiData(response.json);
+          collected.push(...pageRows);
+          nextToken = asText(response.json?.nextToken || response.json?.data?.nextToken || '', 600);
+          if (!nextToken || pageRows.length < pageSize) break;
+        }
+        return {
+          rows: collected,
+          endpoint: { name: label, ok: true, path: `${managerBaseUrl}${lastPath}`, count: collected.length },
+        };
+      }
+
+      for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
+        const hostsById = new Map();
+        for (const source of [
+          { pathname: '/v1/hosts', label: 'site manager hosts', paged: true },
+          { pathname: '/ea/hosts', label: 'site manager hosts legacy', paged: false },
+        ]) {
+          try {
+            const result = await requestSiteManagerRows(managerBaseUrl, source.pathname, source.label, source.paged);
+            const hosts = result.rows.map(slimUniFiHost).filter(Boolean);
+            for (const host of hosts) hostsById.set(host.id, host);
+            endpoints.push({ ...result.endpoint, count: hosts.length });
+          } catch (err) {
+            lastError = err;
+            endpoints.push({ name: source.label, ok: false, path: `${managerBaseUrl}${source.pathname}`, error: err.message, status: err.status || null });
+          }
+        }
+
+        for (const source of [
+          { pathname: '/v1/sites', label: 'site manager sites', paged: true },
+          { pathname: '/ea/sites', label: 'site manager sites legacy', paged: false },
+        ]) {
+          try {
+            const result = await requestSiteManagerRows(managerBaseUrl, source.pathname, source.label, source.paged);
+            const managerSites = result.rows.map(site => {
+              const hostId = asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220);
+              const host = hostsById.get(hostId);
+              return { ...site, hostName: site?.hostName || site?.hostLabel || host?.label || '', source: 'site-manager' };
+            });
+            rows.push(...managerSites);
+            endpoints.push({ ...result.endpoint, count: managerSites.length });
+          } catch (err) {
+            lastError = err;
+            endpoints.push({ name: source.label, ok: false, path: `${managerBaseUrl}${source.pathname}`, error: err.message, status: err.status || null });
+          }
         }
       }
     }
@@ -1982,108 +2095,54 @@ async function collectUniFi() {
     };
   }
 
-  async function requestNetworkIntegrationSites(baseUrlForRequest, pathname, pathForLabel) {
-    const response = await requestUniFiJson(resolveUrl(baseUrlForRequest, pathname), {
-      label: 'UniFi Network sites',
-      maxBytes: 4 * 1024 * 1024,
-    });
-    const sites = unifiData(response.json);
+  async function requestNetworkIntegrationSites(baseUrlForRequest, basePath, pathForLabel) {
+    const limit = 200;
+    const sites = [];
+    let lastPath = basePath;
+    for (let offset = 0; offset < 1000; offset += limit) {
+      const separator = basePath.includes('?') ? '&' : '?';
+      const pathname = `${basePath}${separator}limit=${limit}&offset=${offset}`;
+      lastPath = pathname;
+      const response = await requestUniFiJson(resolveUrl(baseUrlForRequest, pathname), {
+        label: 'UniFi Network sites',
+        maxBytes: 4 * 1024 * 1024,
+      });
+      const pageRows = unifiData(response.json);
+      sites.push(...pageRows);
+      const total = firstFiniteNumber([
+        response.json?.total,
+        response.json?.count,
+        response.json?.totalCount,
+        response.json?.data?.total,
+        response.json?.data?.count,
+        response.json?.data?.totalCount,
+        response.json?.pagination?.total,
+        response.json?.meta?.total,
+      ], NaN);
+      if (!pageRows.length || pageRows.length < limit || (Number.isFinite(total) && sites.length >= total)) break;
+    }
     return {
       sites,
-      endpoint: { name: 'network sites', ok: true, path: pathForLabel || pathname, count: sites.length },
+      endpoint: { name: 'network sites', ok: true, path: pathForLabel || lastPath, count: sites.length },
     };
   }
 
   async function collectNetworkIntegrationClients() {
-    if (!apiKey) return { clients: [], endpoint: null };
-    const configuredSiteIds = uniqueTextValues([unifiSiteId, unifiSite], 180);
+    if (!apiKey) return { clients: [], endpoint: null, legacySiteNames: [] };
     const siteRows = [];
     const endpoints = [];
+    const connectorPrefixes = ['network', 'proxy/network'];
 
     let lastError = null;
     if (unifiHostId) {
       for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
-        for (const connectorPrefix of ['network', 'proxy/network']) {
-          for (const integrationRoot of ['integration', 'integrations']) {
-            const sitesPath = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/${connectorPrefix}/${integrationRoot}/v1/sites`;
-            try {
-              const result = await requestNetworkIntegrationSites(managerBaseUrl, sitesPath, `${managerBaseUrl}${sitesPath}`);
-              siteRows.push(...result.sites);
-              endpoints.push(result.endpoint);
-            } catch (err) {
-              lastError = err;
-            }
-          }
-        }
-      }
-    }
-
-    for (const prefix of parseUniFiPrefixes()) {
-      const prefixClean = prefix.replace(/\/+$/, '');
-      for (const integrationRoot of ['integration', 'integrations']) {
-        const sitesPath = `${prefixClean}/${integrationRoot}/v1/sites`.replace(/^\/?/, '/');
-        try {
-          const result = await requestNetworkIntegrationSites(baseUrl, sitesPath, sitesPath);
-          siteRows.push(...result.sites);
-          endpoints.push(result.endpoint);
-        } catch (err) {
-          lastError = err;
-        }
-      }
-    }
-
-    const siteCandidates = [...configuredSiteIds];
-    const selectedNames = uniqueTextValues([unifiSite, 'default'], 160).map(value => value.toLowerCase());
-    for (const site of siteRows) {
-      const ids = networkIntegrationSiteCandidates(site);
-      const name = networkIntegrationSiteName(site);
-      const matchesSelected = !name || selectedNames.includes(name.toLowerCase()) || ids.includes(unifiSiteId) || ids.includes(unifiSite);
-      if (matchesSelected) siteCandidates.push(...ids);
-    }
-    for (const site of siteRows) {
-      siteCandidates.push(...networkIntegrationSiteCandidates(site));
-    }
-
-    const siteIds = uniqueTextValues(siteCandidates, 180);
-    const emptySuccesses = [];
-    if (unifiHostId) {
-      for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
-        for (const siteId of siteIds) {
-          for (const connectorPrefix of ['network', 'proxy/network']) {
-            for (const integrationRoot of ['integration', 'integrations']) {
-              const basePath = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/${connectorPrefix}/${integrationRoot}/v1/sites/${encodeURIComponent(siteId)}/clients`;
-              try {
-                const result = await requestNetworkIntegrationClientPages(
-                  managerBaseUrl,
-                  (offset, limit) => `${basePath}?limit=${limit}&offset=${offset}`,
-                  `${managerBaseUrl}${basePath}`,
-                );
-                endpoints.push(result.endpoint);
-                if (result.clients.length) return { ...result, endpoints, siteCandidates: siteIds };
-                emptySuccesses.push(result);
-              } catch (err) {
-                lastError = err;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    for (const prefix of parseUniFiPrefixes()) {
-      const prefixClean = prefix.replace(/\/+$/, '');
-      for (const siteId of siteIds) {
-        for (const integrationRoot of ['integration', 'integrations']) {
-          const basePath = `${prefixClean}/${integrationRoot}/v1/sites/${encodeURIComponent(siteId)}/clients`.replace(/^\/?/, '/');
+        for (const connectorPrefix of connectorPrefixes) {
+          const sitesPath = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/${connectorPrefix}/integration/v1/sites`;
           try {
-            const result = await requestNetworkIntegrationClientPages(
-              baseUrl,
-              (offset, limit) => `${basePath}?limit=${limit}&offset=${offset}`,
-              basePath,
-            );
+            const result = await requestNetworkIntegrationSites(managerBaseUrl, sitesPath, `${managerBaseUrl}${sitesPath}`);
+            siteRows.push(...result.sites);
             endpoints.push(result.endpoint);
-            if (result.clients.length) return { ...result, endpoints, siteCandidates: siteIds };
-            emptySuccesses.push(result);
+            if (result.sites.length) break;
           } catch (err) {
             lastError = err;
           }
@@ -2091,14 +2150,101 @@ async function collectUniFi() {
       }
     }
 
+    for (const prefix of parseUniFiPrefixes()) {
+      const prefixClean = prefix.replace(/\/+$/, '');
+      const sitesPath = `${prefixClean}/integration/v1/sites`.replace(/^\/?/, '/');
+      try {
+        const result = await requestNetworkIntegrationSites(baseUrl, sitesPath, sitesPath);
+        siteRows.push(...result.sites);
+        endpoints.push(result.endpoint);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    const selectedTokens = new Set(uniqueTextValues([unifiSite, unifiSiteId, 'default'], 180).map(normalizeTextKey));
+    const siteMatchesSelection = site => {
+      const identifiers = [
+        ...networkIntegrationSiteIds(site),
+        ...networkIntegrationLegacyRefs(site),
+        networkIntegrationSiteName(site),
+      ].map(normalizeTextKey).filter(Boolean);
+      return !identifiers.length || identifiers.some(value => selectedTokens.has(value));
+    };
+    const matchedSites = siteRows.filter(siteMatchesSelection);
+    const selectedSiteRows = matchedSites.length ? matchedSites : siteRows.length === 1 ? siteRows : [];
+    const networkSiteIds = uniqueTextValues([
+      ...(looksLikeUuid(unifiSiteId) ? [unifiSiteId] : []),
+      ...selectedSiteRows.flatMap(networkIntegrationSiteIds),
+      ...(selectedSiteRows.length ? [] : siteRows.flatMap(networkIntegrationSiteIds)),
+    ], 180).filter(looksLikeUuid);
+    const legacySiteNames = uniqueTextValues([
+      unifiSite,
+      'default',
+      ...selectedSiteRows.flatMap(networkIntegrationLegacyRefs),
+    ], 180).filter(value => value && !looksLikeUuid(value));
+    const emptySuccesses = [];
+
+    if (!networkSiteIds.length && siteRows.length) {
+      endpoints.push({
+        name: 'network clients',
+        ok: false,
+        error: 'Network sites were discovered, but no UUID site id was available for /v1/sites/{siteId}/clients',
+      });
+    }
+
+    if (unifiHostId) {
+      for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
+        for (const siteId of networkSiteIds) {
+          for (const connectorPrefix of connectorPrefixes) {
+            const basePath = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/${connectorPrefix}/integration/v1/sites/${encodeURIComponent(siteId)}/clients`;
+            try {
+              const result = await requestNetworkIntegrationClientPages(
+                managerBaseUrl,
+                (offset, limit) => `${basePath}?limit=${limit}&offset=${offset}`,
+                `${managerBaseUrl}${basePath}`,
+              );
+              endpoints.push(result.endpoint);
+              if (result.clients.length) return { ...result, endpoints, legacySiteNames, networkSiteIds };
+              emptySuccesses.push(result);
+            } catch (err) {
+              lastError = err;
+              endpoints.push({ name: 'network clients', ok: false, path: `${managerBaseUrl}${basePath}`, error: err.message, status: err.status || null });
+            }
+          }
+        }
+      }
+    }
+
+    for (const prefix of parseUniFiPrefixes()) {
+      const prefixClean = prefix.replace(/\/+$/, '');
+      for (const siteId of networkSiteIds) {
+        const basePath = `${prefixClean}/integration/v1/sites/${encodeURIComponent(siteId)}/clients`.replace(/^\/?/, '/');
+        try {
+          const result = await requestNetworkIntegrationClientPages(
+            baseUrl,
+            (offset, limit) => `${basePath}?limit=${limit}&offset=${offset}`,
+            basePath,
+          );
+          endpoints.push(result.endpoint);
+          if (result.clients.length) return { ...result, endpoints, legacySiteNames, networkSiteIds };
+          emptySuccesses.push(result);
+        } catch (err) {
+          lastError = err;
+          endpoints.push({ name: 'network clients', ok: false, path: basePath, error: err.message, status: err.status || null });
+        }
+      }
+    }
+
     if (emptySuccesses.length) {
       const best = emptySuccesses[0];
-      return { ...best, endpoints, siteCandidates: siteIds };
+      return { ...best, endpoints, legacySiteNames, networkSiteIds };
     }
 
     return {
       clients: [],
-      siteCandidates: siteIds,
+      legacySiteNames,
+      networkSiteIds,
       endpoints: endpoints.length ? endpoints : undefined,
       endpoint: {
         name: 'network clients',
@@ -2111,7 +2257,8 @@ async function collectUniFi() {
 
   async function collectConnectorLegacyClients(extraSiteNames = []) {
     if (!apiKey || !unifiHostId) return { clients: [], endpoint: null };
-    const siteNames = uniqueTextValues([unifiSite, 'default', unifiSiteId, ...extraSiteNames], 180);
+    const siteNames = uniqueTextValues([unifiSite, 'default', ...extraSiteNames], 180)
+      .filter(value => value && !looksLikeUuid(value));
     const resources = ['stat/sta', 'stat/alluser', 'rest/user', 'list/user'];
     const endpoints = [];
     const emptySuccesses = [];
@@ -2181,7 +2328,7 @@ async function collectUniFi() {
   const siteResult = await collectUniFiSites();
   const siteManagerDeviceResult = await collectSiteManagerDevices();
   const networkClientResult = await collectNetworkIntegrationClients();
-  const connectorLegacyClientResult = await collectConnectorLegacyClients(networkClientResult.siteCandidates || []);
+  const connectorLegacyClientResult = await collectConnectorLegacyClients(networkClientResult.legacySiteNames || []);
   const names = ['health', 'sysinfo', 'devices', 'legacy clients', 'events', 'alarms'];
   const calls = await Promise.allSettled([
     callUniFi('stat/health'),
@@ -2202,12 +2349,17 @@ async function collectUniFi() {
     : connectorLegacyClientResult.clients?.length
       ? connectorLegacyClientResult.clients
       : legacyClients;
+  const selectedSite = findSelectedUniFiSite(siteResult.sites, selectedSiteKey, unifiSite, unifiHostId, unifiSiteId);
+  const siteClientSummary = summarizeSiteClientCounts(selectedSite);
+  const hasSiteClientSummary = !clients.length && siteClientSummary.total > 0;
   const clientSource = networkClientResult.clients?.length
     ? 'network integration'
     : connectorLegacyClientResult.clients?.length
       ? 'connector legacy'
       : legacyClients.length
         ? 'legacy'
+        : hasSiteClientSummary
+          ? 'site manager summary'
         : networkClientResult.endpoint?.ok
           ? 'network integration'
           : connectorLegacyClientResult.endpoint?.ok
@@ -2224,7 +2376,8 @@ async function collectUniFi() {
     ...(connectorLegacyClientResult.endpoints?.length ? connectorLegacyClientResult.endpoints : connectorLegacyClientResult.endpoint ? [connectorLegacyClientResult.endpoint] : []),
   ];
   const ok = endpoints.some(endpoint => endpoint.ok);
-  const overview = summarizeUniFiOverview({ devices, clients, health, events, alarms, endpoints, sysinfo, clientSource });
+  const overview = summarizeUniFiOverview({ devices, clients, health, events, alarms, endpoints, sysinfo, clientSource, siteClientSummary });
+  const clientTotal = clients.length || siteClientSummary.total || 0;
 
   return {
     configured: true,
@@ -2245,8 +2398,9 @@ async function collectUniFi() {
       rows: devices.slice(0, 100),
     },
     clients: {
-      total: clients.length,
+      total: clientTotal,
       source: clientSource,
+      summary: siteClientSummary,
       rows: clients.slice(0, 100),
     },
     events,

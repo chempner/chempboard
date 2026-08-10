@@ -1040,6 +1040,13 @@
       const unifi = state.data.unifi || {};
       const overview = unifi.overview || {};
       const endpointChecks = overview.endpointChecks || {};
+      const clientRows = unifi.clients?.rows || [];
+      const clientSummaryRows = unifi.clients?.summary?.rows || [];
+      const clientTable = clientRows.length
+        ? clientRows.slice(0, 60).map(client => tableRow(client.name || client.mac, `${client.ip || '-'} ${client.essid ? '- ' + client.essid : ''}`, `${formatBytes(client.rxBytes)} in - ${formatBytes(client.txBytes)} out`)).join('')
+        : clientSummaryRows.length
+          ? clientSummaryRows.map(item => tableRow(item.name, `${item.count} ${item.count === 1 ? 'client' : 'clients'}`, 'summary only')).join('')
+          : '<div class="empty-state">No client rows returned by UniFi.</div>';
       if (!unifi.configured) return `<div class="empty-state">${escapeHtml(unifi.error || 'UniFi Network is not configured.')}</div>`;
       return `
         <div class="page-stack">
@@ -1098,9 +1105,9 @@
             </div>
           </section>
           <section class="panel">
-            <div class="panel-heading"><div><h2>Clients</h2><p>${unifi.clients?.total || 0} clients</p></div></div>
+            <div class="panel-heading"><div><h2>Clients</h2><p>${unifi.clients?.total || 0} clients${!clientRows.length && clientSummaryRows.length ? ' reported by Site Manager' : ''}</p></div></div>
             <div class="table">
-              ${(unifi.clients?.rows || []).slice(0, 60).map(client => tableRow(client.name || client.mac, `${client.ip || '-'} ${client.essid ? '- ' + client.essid : ''}`, `${formatBytes(client.rxBytes)} in - ${formatBytes(client.txBytes)} out`)).join('') || '<div class="empty-state">No clients.</div>'}
+              ${clientTable}
             </div>
           </section>
           <div class="log-grid">
