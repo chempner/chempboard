@@ -56,7 +56,15 @@ Each machine stores:
 | `tags` | `["studio"]` |
 | `enabled` | `true` |
 
-If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255`. ChempBoard also tries an inferred `/24` directed broadcast when a machine was configured with a host IP like `10.13.37.33`, and it records every UDP send attempt in the wake log. If that still does not work, run the app on host networking or add the machine on the same L2 network as the container host.
+If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255`. ChempBoard also tries an inferred `/24` directed broadcast when a machine was configured with a host IP like `10.13.37.33`, and it records every UDP send attempt in the wake log.
+
+If the wake log says the UDP packets were sent but the machine stays asleep:
+
+1. Prefer `10.13.37.255` as the machine broadcast on a `10.13.37.x/24` network.
+2. Run ChempBoard with `docker-compose.truenas.host-network.yml` so packets leave from the NAS host network instead of Docker bridge networking.
+3. Confirm the target machine is wired Ethernet, not Wi-Fi, and has Wake-on-LAN enabled in BIOS/UEFI and the OS.
+4. On Windows, disable Fast Startup and enable "Wake on Magic Packet" for the NIC.
+5. If the machine is on another VLAN, configure a directed broadcast or WOL relay on the network side.
 
 ## Local Run
 
@@ -84,5 +92,14 @@ Use `docker-compose.truenas.yml` as the Custom App compose file after the image 
 docker compose -f docker-compose.truenas.yml pull
 docker compose -f docker-compose.truenas.yml up -d
 ```
+
+For Wake-on-LAN troubleshooting, use the host-network variant instead:
+
+```sh
+docker compose -f docker-compose.truenas.host-network.yml pull
+docker compose -f docker-compose.truenas.host-network.yml up -d
+```
+
+With host networking there is no Docker `ports:` mapping. Set `HOST_PORT=5035` if your proxy points at `http://10.13.37.11:5035`, otherwise the default is `8091`.
 
 The default TrueNAS data path is `/mnt/SSD/Apps/ChempBoard`. Adjust it if your apps dataset lives somewhere else. Make sure Auth Manager/Portal has an app permission named `chempboard`, then grant it to the users who should see this dashboard.

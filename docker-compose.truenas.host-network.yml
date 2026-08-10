@@ -1,0 +1,48 @@
+services:
+  chempboard:
+    image: ghcr.io/chempner/chempboard:latest
+    container_name: chempboard
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PORT: ${HOST_PORT:-8091}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to the shared Auth Manager secret}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-http://127.0.0.1:3100}
+      AUTH_SERVICE_PUBLIC_URL: ${AUTH_SERVICE_PUBLIC_URL:-https://auth.example.com}
+      APP_NAME: chempboard
+      APP_LABEL: ChempBoard
+      SECURE_COOKIES: ${SECURE_COOKIES:-true}
+      DATA_DIR: /data
+      NAS_PUBLIC_URL: ${NAS_PUBLIC_URL:-}
+      NAS_PROC_PATH: /host/proc
+      NAS_DISK_PATHS: ${NAS_DISK_PATHS:-/data,/host/mnt}
+      NAS_LOG_FILES: ${NAS_LOG_FILES:-}
+      DOCKER_SOCKET: /var/run/docker.sock
+      WOL_DEFAULT_BROADCAST: ${WOL_DEFAULT_BROADCAST:-255.255.255.255}
+      WOL_DEFAULT_PORT: ${WOL_DEFAULT_PORT:-9}
+      WOL_EXTRA_BROADCASTS: ${WOL_EXTRA_BROADCASTS:-}
+      WOL_REPEAT_COUNT: ${WOL_REPEAT_COUNT:-3}
+      WOL_BIND_ADDRESS: ${WOL_BIND_ADDRESS:-}
+      WOL_BIND_PORT: ${WOL_BIND_PORT:-}
+      WOL_DEVICES: ${WOL_DEVICES:-}
+      HOME_ASSISTANT_URL: ${HOME_ASSISTANT_URL:-}
+      HOME_ASSISTANT_TOKEN: ${HOME_ASSISTANT_TOKEN:-}
+      HA_LOGBOOK_HOURS: ${HA_LOGBOOK_HOURS:-24}
+      UNIFI_URL: ${UNIFI_URL:-}
+      UNIFI_USERNAME: ${UNIFI_USERNAME:-}
+      UNIFI_PASSWORD: ${UNIFI_PASSWORD:-}
+      UNIFI_API_KEY: ${UNIFI_API_KEY:-}
+      UNIFI_SITE: ${UNIFI_SITE:-default}
+      UNIFI_INSECURE: ${UNIFI_INSECURE:-true}
+      UNIFI_LOGIN_PATHS: ${UNIFI_LOGIN_PATHS:-/api/auth/login,/api/login}
+      UNIFI_API_PREFIXES: ${UNIFI_API_PREFIXES:-/proxy/network,}
+      STATUS_SITES: ${STATUS_SITES:-}
+    volumes:
+      - /mnt/SSD/Apps/ChempBoard:/data
+      - /proc:/host/proc:ro
+      - /var/log:/host/var/log:ro
+      - /mnt:/host/mnt:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - wud.watch=true
+      - wud.tag.include=^latest$$

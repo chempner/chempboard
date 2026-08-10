@@ -1256,6 +1256,7 @@
       const message = state.wakeMessages.get(device.id);
       const targets = Array.isArray(device.targets) && device.targets.length ? device.targets : [device.broadcast];
       const targetText = targets.map(target => `${target}:${device.port}`).join(', ');
+      const summary = device.description || `${device.mac} via ${targetText}`;
       const actions = [
         `<button class="primary-button" data-wake-device="${escapeHtml(device.id)}" type="button" ${device.enabled ? '' : 'disabled'}>Wake</button>`,
       ];
@@ -1265,7 +1266,7 @@
       }
       return `<article class="resource-card ${device.enabled ? '' : 'disabled'}">
         <header><span class="status-dot ${device.enabled ? 'up' : 'warn'}"></span><div><h2>${escapeHtml(device.name)}</h2><span>${escapeHtml(device.enabled ? 'Enabled' : 'Disabled')}</span></div></header>
-        <p>${escapeHtml(device.description || `${device.mac} via ${device.broadcast}:${device.port}`)}</p>
+        <p>${escapeHtml(summary)}</p>
         <div class="metric-list">
           <div class="metric-row"><strong>MAC</strong><div>${escapeHtml(device.mac)}</div></div>
           <div class="metric-row"><strong>Broadcast</strong><div>${escapeHtml(targetText)}</div></div>
