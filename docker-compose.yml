@@ -1,0 +1,48 @@
+services:
+  chempboard:
+    image: ${CHEMPBOARD_IMAGE:-ghcr.io/chempner/chempboard:latest}
+    build:
+      context: .
+    container_name: chempboard
+    ports:
+      - "${HOST_PORT:-8091}:80"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to the shared Auth Manager secret}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-http://host.docker.internal:3100}
+      AUTH_SERVICE_PUBLIC_URL: ${AUTH_SERVICE_PUBLIC_URL:-http://localhost:3100}
+      APP_NAME: chempboard
+      APP_LABEL: ChempBoard
+      SECURE_COOKIES: ${SECURE_COOKIES:-true}
+      DATA_DIR: /data
+      NAS_PUBLIC_URL: ${NAS_PUBLIC_URL:-}
+      NAS_PROC_PATH: ${NAS_PROC_PATH:-/host/proc}
+      NAS_DISK_PATHS: ${NAS_DISK_PATHS:-/data,/host/mnt}
+      NAS_LOG_FILES: ${NAS_LOG_FILES:-}
+      DOCKER_SOCKET: ${DOCKER_SOCKET:-/var/run/docker.sock}
+      HOME_ASSISTANT_URL: ${HOME_ASSISTANT_URL:-}
+      HOME_ASSISTANT_TOKEN: ${HOME_ASSISTANT_TOKEN:-}
+      HA_LOGBOOK_HOURS: ${HA_LOGBOOK_HOURS:-24}
+      UNIFI_URL: ${UNIFI_URL:-}
+      UNIFI_USERNAME: ${UNIFI_USERNAME:-}
+      UNIFI_PASSWORD: ${UNIFI_PASSWORD:-}
+      UNIFI_API_KEY: ${UNIFI_API_KEY:-}
+      UNIFI_SITE: ${UNIFI_SITE:-default}
+      UNIFI_INSECURE: ${UNIFI_INSECURE:-true}
+      UNIFI_LOGIN_PATHS: ${UNIFI_LOGIN_PATHS:-/api/auth/login,/api/login}
+      UNIFI_API_PREFIXES: ${UNIFI_API_PREFIXES:-/proxy/network,}
+      STATUS_SITES: ${STATUS_SITES:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+      - /proc:/host/proc:ro
+      - /var/log:/host/var/log:ro
+      - /mnt:/host/mnt:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

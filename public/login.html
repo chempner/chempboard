@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in - ChempBoard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #030813;
+      --panel: #202b3a;
+      --panel-soft: #14202d;
+      --ink: #eef4fb;
+      --muted: #aab3c2;
+      --line: #374456;
+      --green: #0f766e;
+      --green-dark: #0d9488;
+      --red: #fca5a5;
+      --teal: #5eead4;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: linear-gradient(145deg, #06101d 0%, var(--bg) 55%, #0d1b2d 100%);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .card {
+      width: min(410px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 22px 70px rgba(0, 0, 0, 0.28);
+      padding: 28px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .mark {
+      width: 38px;
+      height: 38px;
+      border: 1px solid rgba(94, 234, 212, 0.38);
+      border-radius: 8px;
+      background: #13544d;
+      display: grid;
+      place-items: center;
+      color: white;
+      font-weight: 900;
+    }
+    h1 { margin: 0; font-size: 1.35rem; letter-spacing: 0; }
+    p { margin: 5px 0 0; color: var(--muted); }
+    form { display: grid; gap: 14px; }
+    label {
+      display: grid;
+      gap: 6px;
+      color: #d5dde8;
+      font-size: 0.78rem;
+      font-weight: 850;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    input {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      background: var(--panel-soft);
+      color: var(--ink);
+      font: inherit;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--teal);
+      box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.15);
+    }
+    button {
+      min-height: 42px;
+      border: 1px solid rgba(94, 234, 212, 0.34);
+      border-radius: 8px;
+      background: var(--green);
+      color: #ecfeff;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 850;
+    }
+    button:hover { background: var(--green-dark); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .links {
+      display: flex;
+      justify-content: center;
+      margin-top: 16px;
+    }
+    a { color: #99f6e4; font-weight: 850; text-decoration: none; }
+    a:hover { color: #ccfbf1; }
+    .status {
+      min-height: 22px;
+      font-size: 0.9rem;
+      color: var(--red);
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+      <div class="mark">B</div>
+      <div>
+        <h1>ChempBoard</h1>
+        <p>Sign in with Auth Manager</p>
+      </div>
+    </div>
+
+    <form id="login-form" autocomplete="on">
+      <label>
+        Username
+        <input id="username" name="username" autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button id="submit-btn" type="submit">Sign in</button>
+      <div class="status" id="status"></div>
+    </form>
+
+    <form class="hidden" id="setup-form" autocomplete="off">
+      <label>
+        New password
+        <input id="new-password" type="password" autocomplete="new-password" minlength="8" required />
+      </label>
+      <label>
+        Confirm password
+        <input id="confirm-password" type="password" autocomplete="new-password" minlength="8" required />
+      </label>
+      <button id="setup-btn" type="submit">Set password</button>
+      <div class="status" id="setup-status"></div>
+    </form>
+
+    <div class="links">
+      <a href="/forgot-password">Forgot password?</a>
+    </div>
+  </main>
+
+  <script>
+    let changeToken = '';
+
+    const loginForm = document.getElementById('login-form');
+    const setupForm = document.getElementById('setup-form');
+    const status = document.getElementById('status');
+    const setupStatus = document.getElementById('setup-status');
+
+    loginForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      status.textContent = '';
+      const button = document.getElementById('submit-btn');
+      button.disabled = true;
+      button.textContent = 'Signing in...';
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (data.must_change_password) {
+          if (data.redirect) {
+            window.location.href = data.redirect;
+            return;
+          }
+          changeToken = data.change_token;
+          loginForm.classList.add('hidden');
+          setupForm.classList.remove('hidden');
+          return;
+        }
+        if (!response.ok) throw new Error(data.error || 'Login failed');
+        window.location.href = '/';
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Sign in';
+      }
+    });
+
+    setupForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      setupStatus.textContent = '';
+      const first = document.getElementById('new-password').value;
+      const second = document.getElementById('confirm-password').value;
+      if (first !== second) {
+        setupStatus.textContent = 'Passwords do not match';
+        return;
+      }
+      const button = document.getElementById('setup-btn');
+      button.disabled = true;
+      button.textContent = 'Saving...';
+      try {
+        const response = await fetch('/api/auth/complete-password-setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ change_token: changeToken, new_password: first }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Password setup failed');
+        window.location.href = '/';
+      } catch (error) {
+        setupStatus.textContent = error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Set password';
+      }
+    });
+  </script>
+</body>
+</html>
