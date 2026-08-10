@@ -783,6 +783,8 @@
       if (!response.ok) {
         const error = new Error(data.error || 'Request failed');
         error.status = response.status;
+        error.data = data;
+        if (Array.isArray(data.attempts)) error.attempts = data.attempts;
         throw error;
       }
       return data;
@@ -921,7 +923,7 @@
               <div><h2>Wake log</h2><p>${(wake.log || []).length} recent entries</p></div>
             </div>
             <div class="table">
-              ${(wake.log || []).slice(0, 80).map(entry => tableRow(entry.deviceName || entry.deviceId, `${entry.ok ? 'Sent' : 'Failed'} by ${entry.displayName || entry.username || '-'}`, `${formatDate(entry.at)}${entry.error ? ' - ' + entry.error : ''}`)).join('') || '<div class="empty-state">No wake requests yet.</div>'}
+              ${(wake.log || []).slice(0, 80).map(entry => tableRow(entry.deviceName || entry.deviceId, `${entry.ok ? 'Sent' : 'Failed'} by ${entry.displayName || entry.username || '-'}`, wakeLogMeta(entry))).join('') || '<div class="empty-state">No wake requests yet.</div>'}
             </div>
           </section>
         </div>
@@ -1093,7 +1095,7 @@
       const wake = state.data.wake || {};
       return `
         <div class="log-grid">
-          ${logPanel('Wake-on-LAN', (wake.log || []).map(entry => `${formatDate(entry.at)}  ${entry.ok ? 'sent' : 'failed'}  ${entry.deviceName || entry.deviceId || ''}  ${entry.displayName || entry.username || ''}${entry.error ? '  ' + entry.error : ''}`))}
+          ${logPanel('Wake-on-LAN', (wake.log || []).map(entry => `${formatDate(entry.at)}  ${entry.ok ? 'sent' : 'failed'}  ${entry.deviceName || entry.deviceId || ''}  ${entry.displayName || entry.username || ''}${describeWakeAttempts(entry.attempts) ? '  ' + describeWakeAttempts(entry.attempts) : ''}${entry.error ? '  ' + entry.error : ''}`))}
           ${(nas.logs || []).map(fileLogPanel).join('') || logPanel('NAS logs', ['No NAS logs visible.'])}
           ${logPanel('Home Assistant logbook', (ha.logbook || []).map(entry => `${formatDate(entry.when)}  ${entry.name || entry.entity_id || ''}  ${entry.message || ''}`))}
           ${logPanel('Home Assistant errors', ha.errorLog || [])}
@@ -1196,6 +1198,14 @@
               <input name="wolDefaultPort" type="number" min="0" max="65535" value="${escapeHtml(settings.wolDefaultPort || 9)}" />
             </label>
             <label>
+              <span>Extra broadcasts</span>
+              <textarea name="wolExtraBroadcasts" rows="3" placeholder="10.13.37.255">${escapeHtml(settings.wolExtraBroadcasts || '')}</textarea>
+            </label>
+            <label>
+              <span>Repeat count</span>
+              <input name="wolRepeatCount" type="number" min="1" max="10" value="${escapeHtml(settings.wolRepeatCount || 3)}" />
+            </label>
+            <label>
               <span>Bind address</span>
               <input name="wolBindAddress" value="${escapeHtml(settings.wolBindAddress || '')}" />
             </label>
@@ -1244,6 +1254,8 @@
 
     function wakeDeviceCard(device) {
       const message = state.wakeMessages.get(device.id);
+      const targets = Array.isArray(device.targets) && device.targets.length ? device.targets : [device.broadcast];
+      const targetText = targets.map(target => `${target}:${device.port}`).join(', ');
       const actions = [
         `<button class="primary-button" data-wake-device="${escapeHtml(device.id)}" type="button" ${device.enabled ? '' : 'disabled'}>Wake</button>`,
       ];
@@ -1256,7 +1268,7 @@
         <p>${escapeHtml(device.description || `${device.mac} via ${device.broadcast}:${device.port}`)}</p>
         <div class="metric-list">
           <div class="metric-row"><strong>MAC</strong><div>${escapeHtml(device.mac)}</div></div>
-          <div class="metric-row"><strong>Target</strong><div>${escapeHtml(device.broadcast)}:${escapeHtml(device.port)}</div></div>
+          <div class="metric-row"><strong>Broadcast</strong><div>${escapeHtml(targetText)}</div></div>
           <div class="metric-row"><strong>Last wake</strong><div>${escapeHtml(device.lastWakeAt ? `${formatDate(device.lastWakeAt)} by ${device.lastWakeBy || '-'}` : 'Never')}</div></div>
         </div>
         ${(device.tags || []).length ? `<div class="chip-row">${device.tags.map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
@@ -1288,6 +1300,22 @@
 
     function tableRow(title, detail, meta) {
       return `<div class="table-row"><div><strong>${escapeHtml(title || '-')}</strong><span>${escapeHtml(detail || '')}</span></div><span>${escapeHtml(meta || '')}</span></div>`;
+    }
+
+    function describeWakeAttempts(attempts) {
+      if (!Array.isArray(attempts) || !attempts.length) return '';
+      const sent = attempts.filter(attempt => attempt.ok).length;
+      const targets = [...new Set(attempts.map(attempt => attempt.target).filter(Boolean))];
+      const targetText = targets.length ? ` to ${targets.join(', ')}` : '';
+      return `${sent}/${attempts.length} UDP sends${targetText}`;
+    }
+
+    function wakeLogMeta(entry) {
+      const parts = [formatDate(entry.at)];
+      const attempts = describeWakeAttempts(entry.attempts);
+      if (attempts) parts.push(attempts);
+      if (entry.error) parts.push(entry.error);
+      return parts.join(' - ');
     }
 
     function fileLogPanel(file) {
@@ -1347,6 +1375,8 @@
         unifiApiPrefixes: field('unifiApiPrefixes').value,
         wolDefaultBroadcast: field('wolDefaultBroadcast').value,
         wolDefaultPort: Number(field('wolDefaultPort').value || 9),
+        wolExtraBroadcasts: normalizePathList(field('wolExtraBroadcasts').value),
+        wolRepeatCount: Number(field('wolRepeatCount').value || 3),
         wolBindAddress: field('wolBindAddress').value,
         wolBindPort: field('wolBindPort').value,
       };
@@ -1406,8 +1436,8 @@
       document.getElementById('wake-dialog-title').textContent = device ? 'Edit machine' : 'Add machine';
       wakeField('name').value = device?.name || '';
       wakeField('mac').value = device?.mac || '';
-      wakeField('broadcast').value = device?.broadcast || '255.255.255.255';
-      wakeField('port').value = device?.port || 9;
+      wakeField('broadcast').value = device?.broadcast || state.settings?.wolDefaultBroadcast || '255.255.255.255';
+      wakeField('port').value = device?.port || state.settings?.wolDefaultPort || 9;
       wakeField('tags').value = (device?.tags || []).join(', ');
       wakeField('description').value = device?.description || '';
       wakeField('enabled').checked = device?.enabled !== false;
@@ -1455,11 +1485,13 @@
       state.wakeMessages.set(deviceId, 'Sending wake packet...');
       render();
       try {
-        await api(`/api/wol/devices/${encodeURIComponent(deviceId)}/wake`, { method: 'POST' });
-        state.wakeMessages.set(deviceId, 'Wake packet sent.');
+        const response = await api(`/api/wol/devices/${encodeURIComponent(deviceId)}/wake`, { method: 'POST' });
+        const attemptText = describeWakeAttempts(response.attempts);
+        state.wakeMessages.set(deviceId, attemptText ? `Wake packet sent: ${attemptText}.` : 'Wake packet sent.');
         await refreshDashboard({ quiet: true });
       } catch (error) {
-        state.wakeMessages.set(deviceId, error.message);
+        const attemptText = describeWakeAttempts(error.attempts);
+        state.wakeMessages.set(deviceId, attemptText ? `${error.message} (${attemptText})` : error.message);
         render();
       }
     }

@@ -25,6 +25,8 @@ Required environment:
 | `DOCKER_SOCKET` | Optional Docker socket path for container status |
 | `WOL_DEFAULT_BROADCAST` | Default Wake-on-LAN broadcast address, defaults to `255.255.255.255` |
 | `WOL_DEFAULT_PORT` | Default Wake-on-LAN UDP port, defaults to `9` |
+| `WOL_EXTRA_BROADCASTS` | Optional extra comma-separated broadcast targets, for example `10.13.37.255` |
+| `WOL_REPEAT_COUNT` | Number of UDP wake sends per target, defaults to `3` |
 | `WOL_BIND_ADDRESS` / `WOL_BIND_PORT` | Optional local UDP bind settings for wake packets |
 | `WOL_DEVICES` | Optional JSON seed for first-run wake machines |
 | `HOME_ASSISTANT_URL` / `HOME_ASSISTANT_TOKEN` | Home Assistant REST API access |
@@ -54,7 +56,7 @@ Each machine stores:
 | `tags` | `["studio"]` |
 | `enabled` | `true` |
 
-If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255`. If that still does not work, run the app on host networking or add the machine on the same L2 network as the container host.
+If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255`. ChempBoard also tries an inferred `/24` directed broadcast when a machine was configured with a host IP like `10.13.37.33`, and it records every UDP send attempt in the wake log. If that still does not work, run the app on host networking or add the machine on the same L2 network as the container host.
 
 ## Local Run
 
