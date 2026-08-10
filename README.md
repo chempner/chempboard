@@ -51,12 +51,14 @@ Each machine stores:
 | --- | --- |
 | `name` | `Studio PC` |
 | `mac` | `AA:BB:CC:DD:EE:FF` |
-| `broadcast` | `10.13.37.255` |
+| `broadcast` | `10.13.37.33` or `10.13.37.255` |
 | `port` | `9` |
 | `tags` | `["studio"]` |
 | `enabled` | `true` |
 
-If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255`. ChempBoard also tries an inferred `/24` directed broadcast when a machine was configured with a host IP like `10.13.37.33`, and it records every UDP send attempt in the wake log.
+For GPTWOL-style setups, enter the machine IP, for example `10.13.37.33`. ChempBoard sends a true unicast packet to that IP, a legacy broadcast-flag packet to the same IP, an inferred `/24` directed broadcast such as `10.13.37.255`, and the configured default broadcast such as `255.255.255.255`. It records every UDP send attempt and runs a short TCP check on the configured port so the Wake page can show whether the machine looks awake.
+
+If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255` or the host-network compose file below.
 
 If the wake log says the UDP packets were sent but the machine stays asleep:
 

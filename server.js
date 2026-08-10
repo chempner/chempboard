@@ -7,6 +7,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const dgram = require('dgram');
+const net = require('net');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 
@@ -562,13 +563,17 @@ function uniqueWakeDeviceId(devices, desiredId) {
 }
 
 function publicWakeDevice(device) {
+  const wakeTargets = wakeTargetsForDevice(device);
+  const targets = [...new Set(wakeTargets.map(target => target.target))];
   return {
     id: device.id,
     name: device.name,
     mac: device.mac,
     broadcast: device.broadcast,
     port: device.port,
-    targets: wakeTargetsForDevice(device),
+    targets,
+    wakeTargets,
+    check: wakeCheckTargetForDevice(device),
     description: device.description,
     tags: device.tags,
     enabled: device.enabled,
@@ -601,13 +606,66 @@ function inferDirectedBroadcast(target) {
   return `${values[0]}.${values[1]}.${values[2]}.255`;
 }
 
-function wakeTargetsForDevice(device) {
-  const extraTargets = parseList(stringSetting('wolExtraBroadcasts', 'WOL_EXTRA_BROADCASTS', '', 1200).replace(/\n/g, ','));
-  const targets = [device.broadcast, inferDirectedBroadcast(device.broadcast), ...extraTargets];
-  return [...new Set(targets.map(target => asText(target, 120)).filter(Boolean))];
+function isIpv4Address(target) {
+  const parts = String(target || '').trim().split('.');
+  if (parts.length !== 4) return false;
+  return parts.every(part => {
+    if (!/^\d+$/.test(part)) return false;
+    const value = Number(part);
+    return Number.isInteger(value) && value >= 0 && value <= 255;
+  });
 }
 
-function sendWakePacketToTarget(device, target) {
+function isBroadcastTarget(target) {
+  const text = String(target || '').trim();
+  return text === '255.255.255.255' || (isIpv4Address(text) && text.endsWith('.255'));
+}
+
+function isUnicastTarget(target) {
+  const text = String(target || '').trim();
+  if (!isIpv4Address(text)) return false;
+  if (text === '0.0.0.0' || isBroadcastTarget(text)) return false;
+  return true;
+}
+
+function wakeTargetsForDevice(device) {
+  const extraTargets = parseList(stringSetting('wolExtraBroadcasts', 'WOL_EXTRA_BROADCASTS', '', 1200).replace(/\n/g, ','));
+  const defaultBroadcast = stringSetting('wolDefaultBroadcast', 'WOL_DEFAULT_BROADCAST', '255.255.255.255', 120) || '255.255.255.255';
+  const targetTexts = [device.broadcast, inferDirectedBroadcast(device.broadcast), defaultBroadcast, ...extraTargets]
+    .map(target => asText(target, 120))
+    .filter(Boolean);
+  const targets = [];
+  const seen = new Set();
+
+  function add(target, mode) {
+    const key = `${target}|${mode}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    targets.push({ target, mode });
+  }
+
+  for (const target of targetTexts) {
+    if (isUnicastTarget(target)) {
+      add(target, 'unicast');
+      add(target, 'legacy');
+    } else {
+      add(target, 'broadcast');
+    }
+  }
+
+  return targets;
+}
+
+function wakeCheckTargetForDevice(device) {
+  if (!isUnicastTarget(device.broadcast)) return null;
+  return {
+    host: device.broadcast,
+    port: device.port,
+    label: `TCP ${device.port}`,
+  };
+}
+
+function sendWakePacketToTarget(device, target, mode) {
   const packet = buildMagicPacket(device.mac);
   const socket = dgram.createSocket('udp4');
   const bindOptions = {};
@@ -631,15 +689,51 @@ function sendWakePacketToTarget(device, target) {
 
     socket.on('error', finish);
     socket.bind(bindOptions, () => {
-      try {
-        socket.setBroadcast(true);
-      } catch (err) {
-        finish(err);
-        return;
+      if (mode !== 'unicast') {
+        try {
+          socket.setBroadcast(true);
+        } catch (err) {
+          finish(err);
+          return;
+        }
       }
       socket.send(packet, 0, packet.length, device.port, target, finish);
     });
   });
+}
+
+function checkTcpPort(host, port, timeoutMs = 1400) {
+  return new Promise(resolve => {
+    const checkedAt = new Date().toISOString();
+    const startedAt = Date.now();
+    const socket = net.createConnection({ host, port });
+    let settled = false;
+
+    function finish(open, error = '') {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({
+        host,
+        port,
+        open,
+        checkedAt,
+        latencyMs: Date.now() - startedAt,
+        error,
+      });
+    }
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false, 'timeout'));
+    socket.once('error', err => finish(false, err.code || err.message));
+  });
+}
+
+async function checkWakeDevice(device) {
+  const checkTarget = wakeCheckTargetForDevice(device);
+  if (!checkTarget) return { configured: false, open: false, checkedAt: new Date().toISOString() };
+  return { configured: true, label: checkTarget.label, ...(await checkTcpPort(checkTarget.host, checkTarget.port)) };
 }
 
 async function sendWakePacket(device) {
@@ -647,17 +741,18 @@ async function sendWakePacket(device) {
   const targets = wakeTargetsForDevice(device);
   const attempts = [];
 
-  for (const target of targets) {
+  for (const { target, mode } of targets) {
     for (let index = 0; index < repeatCount; index += 1) {
       const attempt = {
         target,
+        mode,
         port: device.port,
         index: index + 1,
         ok: false,
         at: new Date().toISOString(),
       };
       try {
-        await sendWakePacketToTarget(device, target);
+        await sendWakePacketToTarget(device, target, mode);
         attempt.ok = true;
       } catch (err) {
         attempt.error = err.message;
@@ -692,8 +787,12 @@ function appendWakeLog(entry) {
   writeJsonAtomic(WAKE_LOG_FILE, log.slice(0, 200));
 }
 
-function collectWakeSnapshot() {
-  const devices = loadWakeDevices().map(publicWakeDevice);
+async function collectWakeSnapshot() {
+  const rawDevices = loadWakeDevices();
+  const devices = await Promise.all(rawDevices.map(async device => ({
+    ...publicWakeDevice(device),
+    status: await checkWakeDevice(device),
+  })));
   const enabled = devices.filter(device => device.enabled).length;
   const lastWakeAt = devices
     .map(device => device.lastWakeAt)
@@ -1863,6 +1962,8 @@ app.post('/api/wol/devices/:id/wake', requireAuth, async (req, res) => {
 
   try {
     const attempts = await sendWakePacket(device);
+    await delay(900);
+    const status = await checkWakeDevice(device);
     const updatedAt = new Date().toISOString();
     devices[index] = {
       ...device,
@@ -1871,13 +1972,14 @@ app.post('/api/wol/devices/:id/wake', requireAuth, async (req, res) => {
       updatedAt,
     };
     writeWakeDevices(devices);
-    appendWakeLog({ ...logBase, ok: true, attempts });
-    return res.json({ ok: true, attempts, device: publicWakeDevice(devices[index]) });
+    appendWakeLog({ ...logBase, ok: true, attempts, status });
+    return res.json({ ok: true, attempts, status, device: { ...publicWakeDevice(devices[index]), status } });
   } catch (err) {
     console.error(`[wol] Failed to wake ${device.name}:`, err.message);
     const attempts = Array.isArray(err.attempts) ? err.attempts : [];
-    appendWakeLog({ ...logBase, ok: false, error: err.message, attempts });
-    return res.status(502).json({ error: `Could not send wake packet: ${err.message}`, attempts });
+    const status = await checkWakeDevice(device);
+    appendWakeLog({ ...logBase, ok: false, error: err.message, attempts, status });
+    return res.status(502).json({ error: `Could not send wake packet: ${err.message}`, attempts, status });
   }
 });
 

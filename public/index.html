@@ -1166,7 +1166,7 @@
       const wake = state.data.wake || {};
       return `
         <div class="log-grid">
-          ${logPanel('Wake-on-LAN', (wake.log || []).map(entry => `${formatDate(entry.at)}  ${entry.ok ? 'sent' : 'failed'}  ${entry.deviceName || entry.deviceId || ''}  ${entry.displayName || entry.username || ''}${describeWakeAttempts(entry.attempts) ? '  ' + describeWakeAttempts(entry.attempts) : ''}${entry.error ? '  ' + entry.error : ''}`))}
+          ${logPanel('Wake-on-LAN', (wake.log || []).map(entry => `${formatDate(entry.at)}  ${entry.ok ? 'sent' : 'failed'}  ${entry.deviceName || entry.deviceId || ''}  ${entry.displayName || entry.username || ''}${describeWakeAttempts(entry.attempts) ? '  ' + describeWakeAttempts(entry.attempts) : ''}${describeWakeStatus(entry.status) ? '  ' + describeWakeStatus(entry.status) : ''}${entry.error ? '  ' + entry.error : ''}`))}
           ${(nas.logs || []).map(fileLogPanel).join('') || logPanel('NAS logs', ['No NAS logs visible.'])}
           ${logPanel('Home Assistant logbook', (ha.logbook || []).map(entry => `${formatDate(entry.when)}  ${entry.name || entry.entity_id || ''}  ${entry.message || ''}`))}
           ${logPanel('Home Assistant errors', ha.errorLog || [])}
@@ -1325,8 +1325,9 @@
 
     function wakeDeviceCard(device) {
       const message = state.wakeMessages.get(device.id);
-      const targets = Array.isArray(device.targets) && device.targets.length ? device.targets : [device.broadcast];
-      const targetText = targets.map(target => `${target}:${device.port}`).join(', ');
+      const targetText = formatWakeTargets(device);
+      const status = device.status || {};
+      const check = device.check || status || {};
       const summary = device.description || `${device.mac} via ${targetText}`;
       const actions = [
         `<button class="primary-button" data-wake-device="${escapeHtml(device.id)}" type="button" ${device.enabled ? '' : 'disabled'}>Wake</button>`,
@@ -1340,7 +1341,8 @@
         <p>${escapeHtml(summary)}</p>
         <div class="metric-list">
           <div class="metric-row"><strong>MAC</strong><div>${escapeHtml(device.mac)}</div></div>
-          <div class="metric-row"><strong>Broadcast</strong><div>${escapeHtml(targetText)}</div></div>
+          <div class="metric-row"><strong>IP / targets</strong><div>${escapeHtml(targetText)}</div></div>
+          <div class="metric-row"><strong>Check</strong><div>${wakeStatusText(status, check)}</div></div>
           <div class="metric-row"><strong>Last wake</strong><div>${escapeHtml(device.lastWakeAt ? `${formatDate(device.lastWakeAt)} by ${device.lastWakeBy || '-'}` : 'Never')}</div></div>
         </div>
         ${(device.tags || []).length ? `<div class="chip-row">${device.tags.map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
@@ -1374,18 +1376,65 @@
       return `<div class="table-row"><div><strong>${escapeHtml(title || '-')}</strong><span>${escapeHtml(detail || '')}</span></div><span>${escapeHtml(meta || '')}</span></div>`;
     }
 
+    function formatWakeTargets(device) {
+      const targets = Array.isArray(device.wakeTargets) && device.wakeTargets.length
+        ? device.wakeTargets
+        : (Array.isArray(device.targets) && device.targets.length ? device.targets.map(target => ({ target, mode: '' })) : [{ target: device.broadcast, mode: '' }]);
+      const grouped = new Map();
+      for (const attempt of targets) {
+        const target = String(attempt.target || '').trim();
+        if (!target) continue;
+        const modes = grouped.get(target) || new Set();
+        if (attempt.mode) modes.add(attempt.mode);
+        grouped.set(target, modes);
+      }
+      return [...grouped.entries()].map(([target, modes]) => {
+        const modeText = modes.size ? ` (${[...modes].join(', ')})` : '';
+        return `${target}:${device.port}${modeText}`;
+      }).join(', ');
+    }
+
+    function wakeStatusText(status = {}, check = {}) {
+      if (!status.configured && !check.host) return '<span class="muted">No TCP check</span>';
+      const open = status.open === true;
+      const closed = status.open === false;
+      const tone = open ? 'up' : closed ? 'down' : 'warn';
+      const label = check.label || status.label || `TCP ${check.port || status.port || '-'}`;
+      const detail = open ? 'open' : closed ? 'closed' : 'unknown';
+      const suffix = status.latencyMs !== undefined ? `, ${status.latencyMs}ms` : status.error ? `, ${status.error}` : '';
+      return `<span class="status-row"><span class="status-dot ${tone}"></span><span>${escapeHtml(label)} ${escapeHtml(detail + suffix)}</span></span>`;
+    }
+
     function describeWakeAttempts(attempts) {
       if (!Array.isArray(attempts) || !attempts.length) return '';
       const sent = attempts.filter(attempt => attempt.ok).length;
-      const targets = [...new Set(attempts.map(attempt => attempt.target).filter(Boolean))];
+      const grouped = new Map();
+      for (const attempt of attempts) {
+        if (!attempt.target) continue;
+        const modes = grouped.get(attempt.target) || new Set();
+        if (attempt.mode) modes.add(attempt.mode);
+        grouped.set(attempt.target, modes);
+      }
+      const targets = [...grouped.entries()].map(([target, modes]) => {
+        const modeText = modes.size ? ` (${[...modes].join(', ')})` : '';
+        return `${target}${modeText}`;
+      });
       const targetText = targets.length ? ` to ${targets.join(', ')}` : '';
       return `${sent}/${attempts.length} UDP sends${targetText}`;
+    }
+
+    function describeWakeStatus(status) {
+      if (!status?.configured) return '';
+      const label = status.label || `TCP ${status.port || '-'}`;
+      return status.open ? `${label} is open` : `${label} still closed`;
     }
 
     function wakeLogMeta(entry) {
       const parts = [formatDate(entry.at)];
       const attempts = describeWakeAttempts(entry.attempts);
       if (attempts) parts.push(attempts);
+      const status = describeWakeStatus(entry.status);
+      if (status) parts.push(status);
       if (entry.error) parts.push(entry.error);
       return parts.join(' - ');
     }
@@ -1587,11 +1636,13 @@
       try {
         const response = await api(`/api/wol/devices/${encodeURIComponent(deviceId)}/wake`, { method: 'POST' });
         const attemptText = describeWakeAttempts(response.attempts);
-        state.wakeMessages.set(deviceId, attemptText ? `Wake packet sent: ${attemptText}.` : 'Wake packet sent.');
+        const statusText = describeWakeStatus(response.status);
+        state.wakeMessages.set(deviceId, [attemptText ? `Wake packet sent: ${attemptText}` : 'Wake packet sent', statusText].filter(Boolean).join(' - ') + '.');
         await refreshDashboard({ quiet: true });
       } catch (error) {
         const attemptText = describeWakeAttempts(error.attempts);
-        state.wakeMessages.set(deviceId, attemptText ? `${error.message} (${attemptText})` : error.message);
+        const statusText = describeWakeStatus(error.status);
+        state.wakeMessages.set(deviceId, [error.message, attemptText, statusText].filter(Boolean).join(' - '));
         render();
       }
     }
