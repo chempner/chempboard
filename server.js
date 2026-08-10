@@ -2075,6 +2075,50 @@ async function collectUniFi() {
     };
   }
 
+  async function collectConnectorLegacyClients() {
+    if (!apiKey || !unifiHostId) return { clients: [], endpoint: null };
+    const siteNames = uniqueTextValues([unifiSite, 'default', unifiSiteId], 180);
+    const resources = ['stat/sta', 'stat/alluser'];
+    const endpoints = [];
+    const emptySuccesses = [];
+    let lastError = null;
+
+    for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
+      for (const siteName of siteNames) {
+        for (const connectorPrefix of ['network', 'proxy/network']) {
+          for (const resource of resources) {
+            const pathname = `/v1/connector/consoles/${encodeURIComponent(unifiHostId)}/${connectorPrefix}/api/s/${encodeURIComponent(siteName)}/${resource}`;
+            try {
+              const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathname), {
+                label: 'UniFi connector legacy clients',
+                maxBytes: 8 * 1024 * 1024,
+              });
+              const clients = unifiData(response.json).map(slimUnifiClient);
+              const endpoint = { name: 'connector legacy clients', ok: true, path: `${managerBaseUrl}${pathname}`, count: clients.length };
+              endpoints.push(endpoint);
+              if (clients.length) return { clients, endpoint, endpoints };
+              emptySuccesses.push({ clients, endpoint });
+            } catch (err) {
+              lastError = err;
+              endpoints.push({ name: 'connector legacy clients', ok: false, path: `${managerBaseUrl}${pathname}`, error: err.message, status: err.status || null });
+            }
+          }
+        }
+      }
+    }
+
+    if (emptySuccesses.length) {
+      const best = emptySuccesses[0];
+      return { ...best, endpoints };
+    }
+
+    return {
+      clients: [],
+      endpoints,
+      endpoint: { name: 'connector legacy clients', ok: false, error: lastError?.message || 'No connector legacy clients endpoint worked', status: lastError?.status || null },
+    };
+  }
+
   async function callUniFi(resource, options = {}) {
     const prefixes = parseUniFiPrefixes();
     const methods = options.body ? ['POST', 'GET'] : ['GET'];
@@ -2103,6 +2147,7 @@ async function collectUniFi() {
   const siteResult = await collectUniFiSites();
   const siteManagerDeviceResult = await collectSiteManagerDevices();
   const networkClientResult = await collectNetworkIntegrationClients();
+  const connectorLegacyClientResult = await collectConnectorLegacyClients();
   const names = ['health', 'sysinfo', 'devices', 'legacy clients', 'events', 'alarms'];
   const calls = await Promise.allSettled([
     callUniFi('stat/health'),
@@ -2118,8 +2163,22 @@ async function collectUniFi() {
   const localDevices = unifiData(settledValue(calls[2], {}).json || settledValue(calls[2], {})).map(slimUnifiDevice);
   const devices = unifiHostId && siteManagerDeviceResult.endpoint?.ok ? siteManagerDeviceResult.devices : localDevices;
   const legacyClients = unifiData(settledValue(calls[3], {}).json || settledValue(calls[3], {})).map(slimUnifiClient);
-  const clients = networkClientResult.clients?.length ? networkClientResult.clients : legacyClients;
-  const clientSource = networkClientResult.clients?.length ? 'network integration' : legacyClients.length ? 'legacy' : networkClientResult.endpoint?.ok ? 'network integration' : 'legacy';
+  const clients = networkClientResult.clients?.length
+    ? networkClientResult.clients
+    : connectorLegacyClientResult.clients?.length
+      ? connectorLegacyClientResult.clients
+      : legacyClients;
+  const clientSource = networkClientResult.clients?.length
+    ? 'network integration'
+    : connectorLegacyClientResult.clients?.length
+      ? 'connector legacy'
+      : legacyClients.length
+        ? 'legacy'
+        : networkClientResult.endpoint?.ok
+          ? 'network integration'
+          : connectorLegacyClientResult.endpoint?.ok
+            ? 'connector legacy'
+            : 'legacy';
   const events = unifiData(settledValue(calls[4], {}).json || settledValue(calls[4], {})).map(slimUnifiEvent).slice(0, 120);
   const alarms = unifiData(settledValue(calls[5], {}).json || settledValue(calls[5], {})).map(slimUnifiEvent).slice(0, 120);
   const dataEndpoints = names.map((name, index) => endpointResult(name, calls[index]));
@@ -2128,6 +2187,7 @@ async function collectUniFi() {
     ...dataEndpoints,
     ...(siteManagerDeviceResult.endpoint ? [siteManagerDeviceResult.endpoint] : []),
     ...(networkClientResult.endpoints?.length ? networkClientResult.endpoints : networkClientResult.endpoint ? [networkClientResult.endpoint] : []),
+    ...(connectorLegacyClientResult.endpoints?.length ? connectorLegacyClientResult.endpoints : connectorLegacyClientResult.endpoint ? [connectorLegacyClientResult.endpoint] : []),
   ];
   const ok = endpoints.some(endpoint => endpoint.ok);
   const overview = summarizeUniFiOverview({ devices, clients, health, events, alarms, endpoints, sysinfo, clientSource });
