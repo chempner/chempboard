@@ -36,7 +36,7 @@
       font-synthesis: none;
       text-rendering: optimizeLegibility;
     }
-    button, input, select { font: inherit; }
+    button, input, select, textarea { font: inherit; }
     button {
       color: inherit;
       border: 0;
@@ -44,7 +44,7 @@
     }
     button:disabled { cursor: not-allowed; opacity: 0.6; }
     a { color: inherit; text-decoration: none; }
-    input, select {
+    input, select, textarea {
       width: 100%;
       min-height: 2.65rem;
       border: 1px solid var(--line);
@@ -54,7 +54,11 @@
       color: var(--ink);
       padding: 0.62rem 0.75rem;
     }
-    input:focus, select:focus {
+    textarea {
+      min-height: 6rem;
+      resize: vertical;
+    }
+    input:focus, select:focus, textarea:focus {
       border-color: var(--teal);
       box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.15);
     }
@@ -237,6 +241,11 @@
       font-weight: 750;
     }
     .notice.show { display: block; }
+    .notice.ok {
+      border-color: rgba(134, 239, 172, 0.34);
+      background: rgba(22, 101, 52, 0.26);
+      color: #bbf7d0;
+    }
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -477,6 +486,25 @@
       gap: 0.9rem;
       padding: 1.1rem;
     }
+    .settings-form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.9rem;
+    }
+    .settings-form .full { grid-column: 1 / -1; }
+    .settings-section {
+      display: grid;
+      gap: 0.9rem;
+      align-content: start;
+      padding: 1rem;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: var(--panel-soft);
+    }
+    .settings-section h2 {
+      margin: 0;
+      font-size: 1.08rem;
+    }
     .modal-form .full { grid-column: 1 / -1; }
     .modal-actions {
       grid-column: 1 / -1;
@@ -510,7 +538,7 @@
       .page-actions { width: 100%; justify-content: stretch; }
       .page-actions > * { flex: 1 1 auto; }
       .resource-grid, .log-grid { grid-template-columns: 1fr; }
-      .modal-form { grid-template-columns: 1fr; }
+      .modal-form, .settings-form { grid-template-columns: 1fr; }
       .metric-row { grid-template-columns: 1fr; }
     }
     @media (max-width: 560px) {
@@ -530,10 +558,12 @@
       <nav class="nav-links" aria-label="Main">
         <button class="nav-link" data-route="overview" type="button">Overview</button>
         <button class="nav-link" data-route="nas" type="button">NAS</button>
+        <button class="nav-link" data-route="wake" type="button">Wake</button>
         <button class="nav-link" data-route="homeassistant" type="button">Home Assistant</button>
         <button class="nav-link" data-route="unifi" type="button">UniFi</button>
         <button class="nav-link" data-route="sites" type="button">Sites</button>
         <button class="nav-link" data-route="logs" type="button">Logs</button>
+        <button class="nav-link hidden" data-route="settings" data-admin-route="true" type="button">Settings</button>
       </nav>
       <div class="topbar-actions">
         <span class="user-name" id="session-name">Loading...</span>
@@ -551,6 +581,7 @@
         </div>
         <div class="page-actions">
           <button class="secondary-button" id="refresh-btn" type="button">Refresh</button>
+          <button class="primary-button hidden" id="add-wake-btn" type="button">Add machine</button>
           <button class="primary-button hidden" id="add-site-btn" type="button">Add site</button>
         </div>
       </section>
@@ -608,14 +639,58 @@
     </form>
   </dialog>
 
+  <dialog id="wake-dialog">
+    <form method="dialog" class="modal-head">
+      <h2 id="wake-dialog-title">Add machine</h2>
+      <button class="secondary-button" type="submit">Close</button>
+    </form>
+    <form class="modal-form" id="wake-form">
+      <label>
+        <span>Name</span>
+        <input id="wake-name" name="name" required maxlength="100" />
+      </label>
+      <label>
+        <span>MAC address</span>
+        <input id="wake-mac" name="mac" required placeholder="AA:BB:CC:DD:EE:FF" autocomplete="off" />
+      </label>
+      <label>
+        <span>Broadcast</span>
+        <input id="wake-broadcast" name="broadcast" required placeholder="255.255.255.255" autocomplete="off" />
+      </label>
+      <label>
+        <span>Port</span>
+        <input id="wake-port" name="port" type="number" min="0" max="65535" required />
+      </label>
+      <label class="full">
+        <span>Tags</span>
+        <input id="wake-tags" name="tags" placeholder="office, nas, family" autocomplete="off" />
+      </label>
+      <label class="full">
+        <span>Description</span>
+        <input id="wake-description" name="description" maxlength="280" />
+      </label>
+      <label class="check-label full">
+        <input id="wake-enabled" name="enabled" type="checkbox" checked />
+        Enabled
+      </label>
+      <div class="notice full" id="wake-form-status"></div>
+      <div class="modal-actions">
+        <button class="secondary-button" id="wake-cancel-btn" type="button">Cancel</button>
+        <button class="primary-button" id="wake-save-btn" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <script>
     const routes = {
       overview: ['Overview', 'NAS, Home Assistant, UniFi, and site status'],
       nas: ['NAS', 'Host uptime, disks, containers, network, and logs'],
+      wake: ['Wake', 'Wake-on-LAN machines and recent wake requests'],
       homeassistant: ['Home Assistant', 'States, logbook, error log, and API reachability'],
       unifi: ['UniFi', 'Network health, devices, clients, events, and alarms'],
       sites: ['Sites', 'Configured status checks'],
       logs: ['Logs', 'Recent NAS, Home Assistant, and UniFi records'],
+      settings: ['Settings', 'Integration URLs, keys, disks, and wake defaults'],
     };
 
     const state = {
@@ -623,16 +698,23 @@
       user: null,
       app: null,
       data: null,
+      settings: null,
       loading: false,
       editingSiteId: null,
+      editingWakeDeviceId: null,
+      wakeMessages: new Map(),
     };
 
     const content = document.getElementById('content');
     const notice = document.getElementById('notice');
     const addSiteBtn = document.getElementById('add-site-btn');
+    const addWakeBtn = document.getElementById('add-wake-btn');
     const siteDialog = document.getElementById('site-dialog');
     const siteForm = document.getElementById('site-form');
     const siteStatus = document.getElementById('site-form-status');
+    const wakeDialog = document.getElementById('wake-dialog');
+    const wakeForm = document.getElementById('wake-form');
+    const wakeStatus = document.getElementById('wake-form-status');
 
     document.querySelectorAll('[data-route]').forEach(button => {
       button.addEventListener('click', () => navigate(button.dataset.route));
@@ -640,9 +722,12 @@
     document.getElementById('brand-btn').addEventListener('click', () => navigate('overview'));
     document.getElementById('refresh-btn').addEventListener('click', refreshDashboard);
     document.getElementById('logout-btn').addEventListener('click', logout);
+    addWakeBtn.addEventListener('click', () => openWakeDialog());
     addSiteBtn.addEventListener('click', () => openSiteDialog());
     document.getElementById('site-cancel-btn').addEventListener('click', () => siteDialog.close());
+    document.getElementById('wake-cancel-btn').addEventListener('click', () => wakeDialog.close());
     siteForm.addEventListener('submit', saveSite);
+    wakeForm.addEventListener('submit', saveWakeDevice);
     window.addEventListener('hashchange', () => {
       state.route = normalizeRoute(location.hash.replace('#', '') || 'overview');
       render();
@@ -670,7 +755,12 @@
       state.loading = true;
       if (!options.quiet) renderLoading();
       try {
-        state.data = await api('/api/dashboard');
+        const [dashboard, settings] = await Promise.all([
+          api('/api/dashboard'),
+          state.user?.is_admin ? api('/api/settings') : Promise.resolve(null),
+        ]);
+        state.data = dashboard;
+        if (settings?.settings) state.settings = settings.settings;
         state.loading = false;
         showNotice('');
         render();
@@ -728,8 +818,10 @@
       document.getElementById('page-copy').textContent = state.data?.collectedAt ? `${copy} - ${formatDate(state.data.collectedAt)}` : copy;
       document.querySelectorAll('[data-route]').forEach(button => {
         button.classList.toggle('active', button.dataset.route === state.route);
+        if (button.dataset.adminRoute) button.classList.toggle('hidden', !state.user?.is_admin);
       });
       addSiteBtn.classList.toggle('hidden', state.route !== 'sites' || !state.user?.is_admin);
+      addWakeBtn.classList.toggle('hidden', state.route !== 'wake' || !state.user?.is_admin);
 
       if (!state.data) {
         renderLoading();
@@ -738,6 +830,10 @@
 
       if (state.route === 'overview') content.innerHTML = renderOverview();
       if (state.route === 'nas') content.innerHTML = renderNas();
+      if (state.route === 'wake') {
+        content.innerHTML = renderWake();
+        bindWakeButtons();
+      }
       if (state.route === 'homeassistant') content.innerHTML = renderHomeAssistant();
       if (state.route === 'unifi') content.innerHTML = renderUniFi();
       if (state.route === 'sites') {
@@ -745,6 +841,10 @@
         bindSiteButtons();
       }
       if (state.route === 'logs') content.innerHTML = renderLogs();
+      if (state.route === 'settings') {
+        content.innerHTML = renderSettings();
+        bindSettingsForm();
+      }
     }
 
     function renderOverview() {
@@ -753,11 +853,13 @@
       const ha = data.homeAssistant || {};
       const unifi = data.unifi || {};
       const sites = data.sites || {};
+      const wake = data.wake || {};
       return `
         <div class="page-stack">
           <div class="stats-grid">
             ${statCard('NAS uptime', formatDuration(nas.uptime?.seconds), nas.load ? `Load ${nas.load.one} / ${nas.load.five} / ${nas.load.fifteen}` : 'No load data', 'cyan')}
             ${statCard('Memory', percentText(nas.memory?.usedPercent), formatBytes(nas.memory?.used || 0) + ' used', memoryTone(nas.memory?.usedPercent))}
+            ${statCard('Wake machines', String(wake.enabled || 0), `${wake.total || 0} configured`, wake.enabled ? 'green' : 'amber')}
             ${statCard('Home Assistant', ha.configured ? String(ha.states?.total || 0) : 'Off', ha.configured ? `${ha.states?.problems?.length || 0} problem states` : ha.error || 'Not configured', ha.ok ? 'green' : 'amber')}
             ${statCard('UniFi clients', unifi.configured ? String(unifi.clients?.total || 0) : 'Off', unifi.configured ? `${unifi.devices?.offline || 0} offline devices` : unifi.error || 'Not configured', unifi.ok ? 'blue' : 'amber')}
           </div>
@@ -768,6 +870,7 @@
               </div>
               <div class="resource-grid compact">
                 ${serviceCard('NAS', nas.ok !== false, nas.procPath || '', `${(nas.disks || []).length} disks - ${nas.docker?.running || 0}/${nas.docker?.total || 0} containers running`)}
+                ${serviceCard('Wake-on-LAN', true, `${wake.enabled || 0}/${wake.total || 0} enabled`, wake.lastWakeAt ? `Last wake ${formatDate(wake.lastWakeAt)}` : 'No wake requests yet')}
                 ${serviceCard('Home Assistant', !!ha.ok, ha.configured ? ha.baseUrl : ha.error, ha.configured ? `${ha.servicesCount || 0} services - ${ha.eventsCount || 0} event types` : 'Set HOME_ASSISTANT_URL and token')}
                 ${serviceCard('UniFi Network', !!unifi.ok, unifi.configured ? unifi.baseUrl : unifi.error, unifi.configured ? `${unifi.devices?.total || 0} devices - site ${escapeHtml(unifi.site || '')}` : 'Set UniFi credentials')}
                 ${serviceCard('Sites', (sites.down || 0) === 0, `${sites.up || 0}/${sites.total || 0} reachable`, `${sites.down || 0} down - ${sites.disabled || 0} disabled`)}
@@ -788,6 +891,37 @@
             </div>
             <div class="resource-grid compact">
               ${(sites.sites || []).slice(0, 8).map(siteCard).join('') || '<div class="empty-state">No sites configured.</div>'}
+            </div>
+          </section>
+        </div>
+      `;
+    }
+
+    function renderWake() {
+      const wake = state.data.wake || {};
+      const devices = wake.devices || [];
+      return `
+        <div class="page-stack">
+          <div class="stats-grid">
+            ${statCard('Machines', String(wake.total || 0), `${wake.enabled || 0} enabled`, 'cyan')}
+            ${statCard('Disabled', String(wake.disabled || 0), 'Skipped for wake requests', wake.disabled ? 'amber' : 'green')}
+            ${statCard('Last wake', wake.lastWakeAt ? formatDate(wake.lastWakeAt) : '-', 'Most recent request', wake.lastWakeAt ? 'green' : 'blue')}
+            ${statCard('Log entries', String((wake.log || []).length), 'Stored recent wake requests', 'blue')}
+          </div>
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>Machines</h2><p>${devices.length} configured machines</p></div>
+            </div>
+            <div class="resource-grid">
+              ${devices.map(wakeDeviceCard).join('') || '<div class="empty-state">No wake machines configured.</div>'}
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>Wake log</h2><p>${(wake.log || []).length} recent entries</p></div>
+            </div>
+            <div class="table">
+              ${(wake.log || []).slice(0, 80).map(entry => tableRow(entry.deviceName || entry.deviceId, `${entry.ok ? 'Sent' : 'Failed'} by ${entry.displayName || entry.username || '-'}`, `${formatDate(entry.at)}${entry.error ? ' - ' + entry.error : ''}`)).join('') || '<div class="empty-state">No wake requests yet.</div>'}
             </div>
           </section>
         </div>
@@ -956,14 +1090,125 @@
       const nas = state.data.nas || {};
       const ha = state.data.homeAssistant || {};
       const unifi = state.data.unifi || {};
+      const wake = state.data.wake || {};
       return `
         <div class="log-grid">
+          ${logPanel('Wake-on-LAN', (wake.log || []).map(entry => `${formatDate(entry.at)}  ${entry.ok ? 'sent' : 'failed'}  ${entry.deviceName || entry.deviceId || ''}  ${entry.displayName || entry.username || ''}${entry.error ? '  ' + entry.error : ''}`))}
           ${(nas.logs || []).map(fileLogPanel).join('') || logPanel('NAS logs', ['No NAS logs visible.'])}
           ${logPanel('Home Assistant logbook', (ha.logbook || []).map(entry => `${formatDate(entry.when)}  ${entry.name || entry.entity_id || ''}  ${entry.message || ''}`))}
           ${logPanel('Home Assistant errors', ha.errorLog || [])}
           ${logPanel('UniFi events', (unifi.events || []).map(event => `${formatDate(event.time)}  ${event.device || event.subsystem || ''}  ${event.message || ''}`))}
           ${logPanel('UniFi alarms', (unifi.alarms || []).map(event => `${formatDate(event.time)}  ${event.device || event.subsystem || ''}  ${event.message || ''}`))}
         </div>
+      `;
+    }
+
+    function renderSettings() {
+      if (!state.user?.is_admin) return '<div class="empty-state">Admin access required.</div>';
+      const settings = state.settings || {};
+      return `
+        <form class="settings-form" id="settings-form">
+          <section class="settings-section">
+            <h2>NAS</h2>
+            <label>
+              <span>Public URL</span>
+              <input name="nasPublicUrl" value="${escapeHtml(settings.nasPublicUrl || '')}" placeholder="https://board.chempner.ch" />
+            </label>
+            <label>
+              <span>Disk paths</span>
+              <textarea name="nasDiskPaths" placeholder="/data&#10;/host/mnt">${escapeHtml(formatPathList(settings.nasDiskPaths || ''))}</textarea>
+            </label>
+            <label>
+              <span>Log files</span>
+              <textarea name="nasLogFiles" placeholder="/host/var/log/syslog&#10;/host/var/log/messages">${escapeHtml(formatPathList(settings.nasLogFiles || ''))}</textarea>
+            </label>
+          </section>
+          <section class="settings-section">
+            <h2>Home Assistant</h2>
+            <label>
+              <span>URL</span>
+              <input name="homeAssistantUrl" value="${escapeHtml(settings.homeAssistantUrl || '')}" placeholder="http://homeassistant.local:8123" />
+            </label>
+            <label>
+              <span>Long-lived token ${settings.hasHomeAssistantToken ? '(configured)' : ''}</span>
+              <input name="homeAssistantToken" type="password" value="" placeholder="Leave blank to keep" autocomplete="new-password" />
+            </label>
+            <label class="check-label">
+              <input name="clearHomeAssistantToken" type="checkbox" />
+              Clear token
+            </label>
+            <label>
+              <span>Logbook hours</span>
+              <input name="haLogbookHours" type="number" min="1" max="168" value="${escapeHtml(settings.haLogbookHours || 24)}" />
+            </label>
+          </section>
+          <section class="settings-section">
+            <h2>UniFi Network</h2>
+            <label>
+              <span>URL</span>
+              <input name="unifiUrl" value="${escapeHtml(settings.unifiUrl || '')}" placeholder="https://10.13.37.1" />
+            </label>
+            <label>
+              <span>Username</span>
+              <input name="unifiUsername" value="${escapeHtml(settings.unifiUsername || '')}" autocomplete="off" />
+            </label>
+            <label>
+              <span>Password ${settings.hasUnifiPassword ? '(configured)' : ''}</span>
+              <input name="unifiPassword" type="password" value="" placeholder="Leave blank to keep" autocomplete="new-password" />
+            </label>
+            <label>
+              <span>API key ${settings.hasUnifiApiKey ? '(configured)' : ''}</span>
+              <input name="unifiApiKey" type="password" value="" placeholder="Leave blank to keep" autocomplete="new-password" />
+            </label>
+            <label class="check-label">
+              <input name="clearUnifiPassword" type="checkbox" />
+              Clear password
+            </label>
+            <label class="check-label">
+              <input name="clearUnifiApiKey" type="checkbox" />
+              Clear API key
+            </label>
+            <label>
+              <span>Site</span>
+              <input name="unifiSite" value="${escapeHtml(settings.unifiSite || 'default')}" />
+            </label>
+            <label class="check-label">
+              <input name="unifiInsecure" type="checkbox" ${settings.unifiInsecure === false ? '' : 'checked'} />
+              Insecure TLS
+            </label>
+            <label>
+              <span>Login paths</span>
+              <input name="unifiLoginPaths" value="${escapeHtml(settings.unifiLoginPaths || '/api/auth/login,/api/login')}" />
+            </label>
+            <label>
+              <span>API prefixes</span>
+              <input name="unifiApiPrefixes" value="${escapeHtml(settings.unifiApiPrefixes || '/proxy/network,')}" />
+            </label>
+          </section>
+          <section class="settings-section">
+            <h2>Wake-on-LAN</h2>
+            <label>
+              <span>Default broadcast</span>
+              <input name="wolDefaultBroadcast" value="${escapeHtml(settings.wolDefaultBroadcast || '255.255.255.255')}" />
+            </label>
+            <label>
+              <span>Default port</span>
+              <input name="wolDefaultPort" type="number" min="0" max="65535" value="${escapeHtml(settings.wolDefaultPort || 9)}" />
+            </label>
+            <label>
+              <span>Bind address</span>
+              <input name="wolBindAddress" value="${escapeHtml(settings.wolBindAddress || '')}" />
+            </label>
+            <label>
+              <span>Bind port</span>
+              <input name="wolBindPort" type="number" min="0" max="65535" value="${escapeHtml(settings.wolBindPort || '')}" />
+            </label>
+          </section>
+          <div class="notice full" id="settings-status"></div>
+          <div class="page-actions full">
+            <button class="primary-button" id="settings-save-btn" type="submit">Save settings</button>
+          </div>
+        </form>
       `;
     }
 
@@ -994,6 +1239,29 @@
         ${site.error ? `<p>${escapeHtml(site.error)}</p>` : ''}
         ${(site.tags || []).length ? `<div class="chip-row">${site.tags.map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
         ${actions}
+      </article>`;
+    }
+
+    function wakeDeviceCard(device) {
+      const message = state.wakeMessages.get(device.id);
+      const actions = [
+        `<button class="primary-button" data-wake-device="${escapeHtml(device.id)}" type="button" ${device.enabled ? '' : 'disabled'}>Wake</button>`,
+      ];
+      if (state.user?.is_admin) {
+        actions.push(`<button class="secondary-button" data-edit-wake="${escapeHtml(device.id)}" type="button">Edit</button>`);
+        actions.push(`<button class="danger-button" data-delete-wake="${escapeHtml(device.id)}" type="button">Delete</button>`);
+      }
+      return `<article class="resource-card ${device.enabled ? '' : 'disabled'}">
+        <header><span class="status-dot ${device.enabled ? 'up' : 'warn'}"></span><div><h2>${escapeHtml(device.name)}</h2><span>${escapeHtml(device.enabled ? 'Enabled' : 'Disabled')}</span></div></header>
+        <p>${escapeHtml(device.description || `${device.mac} via ${device.broadcast}:${device.port}`)}</p>
+        <div class="metric-list">
+          <div class="metric-row"><strong>MAC</strong><div>${escapeHtml(device.mac)}</div></div>
+          <div class="metric-row"><strong>Target</strong><div>${escapeHtml(device.broadcast)}:${escapeHtml(device.port)}</div></div>
+          <div class="metric-row"><strong>Last wake</strong><div>${escapeHtml(device.lastWakeAt ? `${formatDate(device.lastWakeAt)} by ${device.lastWakeBy || '-'}` : 'Never')}</div></div>
+        </div>
+        ${(device.tags || []).length ? `<div class="chip-row">${device.tags.map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
+        ${message ? `<p class="muted">${escapeHtml(message)}</p>` : ''}
+        <div class="chip-row">${actions.join('')}</div>
       </article>`;
     }
 
@@ -1043,6 +1311,69 @@
       return parts.join(' - ');
     }
 
+    function bindSettingsForm() {
+      const form = document.getElementById('settings-form');
+      if (!form) return;
+      form.addEventListener('submit', saveSettings);
+    }
+
+    async function saveSettings(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const status = document.getElementById('settings-status');
+      const button = document.getElementById('settings-save-btn');
+      status.textContent = '';
+      status.className = 'notice full';
+      button.disabled = true;
+
+      const field = name => form.elements.namedItem(name);
+      const payload = {
+        nasPublicUrl: field('nasPublicUrl').value,
+        nasDiskPaths: normalizePathList(field('nasDiskPaths').value),
+        nasLogFiles: normalizePathList(field('nasLogFiles').value),
+        homeAssistantUrl: field('homeAssistantUrl').value,
+        homeAssistantToken: field('homeAssistantToken').value,
+        clearHomeAssistantToken: field('clearHomeAssistantToken').checked,
+        haLogbookHours: Number(field('haLogbookHours').value || 24),
+        unifiUrl: field('unifiUrl').value,
+        unifiUsername: field('unifiUsername').value,
+        unifiPassword: field('unifiPassword').value,
+        clearUnifiPassword: field('clearUnifiPassword').checked,
+        unifiApiKey: field('unifiApiKey').value,
+        clearUnifiApiKey: field('clearUnifiApiKey').checked,
+        unifiSite: field('unifiSite').value,
+        unifiInsecure: field('unifiInsecure').checked,
+        unifiLoginPaths: field('unifiLoginPaths').value,
+        unifiApiPrefixes: field('unifiApiPrefixes').value,
+        wolDefaultBroadcast: field('wolDefaultBroadcast').value,
+        wolDefaultPort: Number(field('wolDefaultPort').value || 9),
+        wolBindAddress: field('wolBindAddress').value,
+        wolBindPort: field('wolBindPort').value,
+      };
+
+      try {
+        const saved = await api('/api/settings', {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+        state.settings = saved.settings;
+        field('homeAssistantToken').value = '';
+        field('unifiPassword').value = '';
+        field('unifiApiKey').value = '';
+        field('clearHomeAssistantToken').checked = false;
+        field('clearUnifiPassword').checked = false;
+        field('clearUnifiApiKey').checked = false;
+        status.textContent = 'Settings saved.';
+        status.className = 'notice ok show full';
+        await refreshDashboard({ quiet: true });
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = 'notice show full';
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function bindSiteButtons() {
       document.querySelectorAll('[data-edit-site]').forEach(button => {
         button.addEventListener('click', () => {
@@ -1053,6 +1384,91 @@
       document.querySelectorAll('[data-delete-site]').forEach(button => {
         button.addEventListener('click', () => deleteSite(button.dataset.deleteSite));
       });
+    }
+
+    function bindWakeButtons() {
+      document.querySelectorAll('[data-wake-device]').forEach(button => {
+        button.addEventListener('click', () => wakeDevice(button.dataset.wakeDevice));
+      });
+      document.querySelectorAll('[data-edit-wake]').forEach(button => {
+        button.addEventListener('click', () => {
+          const device = (state.data.wake?.devices || []).find(item => item.id === button.dataset.editWake);
+          if (device) openWakeDialog(device);
+        });
+      });
+      document.querySelectorAll('[data-delete-wake]').forEach(button => {
+        button.addEventListener('click', () => deleteWakeDevice(button.dataset.deleteWake));
+      });
+    }
+
+    function openWakeDialog(device = null) {
+      state.editingWakeDeviceId = device?.id || null;
+      document.getElementById('wake-dialog-title').textContent = device ? 'Edit machine' : 'Add machine';
+      wakeField('name').value = device?.name || '';
+      wakeField('mac').value = device?.mac || '';
+      wakeField('broadcast').value = device?.broadcast || '255.255.255.255';
+      wakeField('port').value = device?.port || 9;
+      wakeField('tags').value = (device?.tags || []).join(', ');
+      wakeField('description').value = device?.description || '';
+      wakeField('enabled').checked = device?.enabled !== false;
+      wakeStatus.textContent = '';
+      wakeStatus.classList.remove('show');
+      wakeDialog.showModal();
+    }
+
+    function wakeField(name) {
+      return wakeForm.elements.namedItem(name);
+    }
+
+    async function saveWakeDevice(event) {
+      event.preventDefault();
+      wakeStatus.textContent = '';
+      wakeStatus.classList.remove('show');
+      const button = document.getElementById('wake-save-btn');
+      button.disabled = true;
+      try {
+        const body = {
+          name: wakeField('name').value,
+          mac: wakeField('mac').value,
+          broadcast: wakeField('broadcast').value,
+          port: Number(wakeField('port').value || 9),
+          tags: wakeField('tags').value,
+          description: wakeField('description').value,
+          enabled: wakeField('enabled').checked,
+        };
+        const path = state.editingWakeDeviceId ? `/api/wol/devices/${encodeURIComponent(state.editingWakeDeviceId)}` : '/api/wol/devices';
+        await api(path, {
+          method: state.editingWakeDeviceId ? 'PUT' : 'POST',
+          body: JSON.stringify(body),
+        });
+        wakeDialog.close();
+        await refreshDashboard();
+      } catch (error) {
+        wakeStatus.textContent = error.message;
+        wakeStatus.classList.add('show');
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function wakeDevice(deviceId) {
+      state.wakeMessages.set(deviceId, 'Sending wake packet...');
+      render();
+      try {
+        await api(`/api/wol/devices/${encodeURIComponent(deviceId)}/wake`, { method: 'POST' });
+        state.wakeMessages.set(deviceId, 'Wake packet sent.');
+        await refreshDashboard({ quiet: true });
+      } catch (error) {
+        state.wakeMessages.set(deviceId, error.message);
+        render();
+      }
+    }
+
+    async function deleteWakeDevice(deviceId) {
+      if (!confirm('Delete this wake machine?')) return;
+      await api(`/api/wol/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+      state.wakeMessages.delete(deviceId);
+      await refreshDashboard();
     }
 
     function openSiteDialog(site = null) {
@@ -1158,6 +1574,18 @@
 
     function percentText(value) {
       return value == null || Number.isNaN(Number(value)) ? '-' : `${Number(value)}%`;
+    }
+
+    function formatPathList(value) {
+      return String(value || '')
+        .split(/[,\n]/)
+        .map(item => item.trim())
+        .filter(Boolean)
+        .join('\n');
+    }
+
+    function normalizePathList(value) {
+      return formatPathList(value);
     }
 
     function memoryTone(value) {

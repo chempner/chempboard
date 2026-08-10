@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const dgram = require('dgram');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 
@@ -23,16 +24,16 @@ const SESSION_MAX_AGE_MS = Number(process.env.SESSION_MAX_AGE_DAYS || 30) * 24 *
 const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || `${APP_NAME}_auth_token`;
 const LEGACY_AUTH_COOKIE_NAME = 'auth_token';
 const DATA_DIR = process.env.DATA_DIR || (process.env.NODE_ENV === 'production' ? '/data' : path.join(__dirname, 'data'));
+const SETTINGS_FILE = process.env.SETTINGS_FILE || path.join(DATA_DIR, 'settings.json');
 const SITES_FILE = process.env.SITES_FILE || path.join(DATA_DIR, 'sites.json');
+const WOL_DEVICES_FILE = process.env.WOL_DEVICES_FILE || path.join(DATA_DIR, 'wol-devices.json');
+const WAKE_LOG_FILE = process.env.WAKE_LOG_FILE || path.join(DATA_DIR, 'wake-log.json');
 const API_TIMEOUT_MS = clampInt(process.env.API_TIMEOUT_MS, 6500, 1000, 60000);
 const SITE_TIMEOUT_MS = clampInt(process.env.SITE_TIMEOUT_MS, 4500, 1000, 60000);
 const SITE_CHECK_INSECURE = parseBool(process.env.SITE_CHECK_INSECURE);
 const NAS_PROC_PATH = process.env.NAS_PROC_PATH || (fs.existsSync('/host/proc/uptime') ? '/host/proc' : '/proc');
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-const HA_LOGBOOK_HOURS = clampInt(process.env.HA_LOGBOOK_HOURS, 24, 1, 168);
 const HA_LOW_BATTERY = clampInt(process.env.HA_LOW_BATTERY, 20, 1, 90);
-const UNIFI_SITE = process.env.UNIFI_SITE || 'default';
-const UNIFI_INSECURE = parseBool(process.env.UNIFI_INSECURE, true);
 const LOG_LINE_LIMIT = clampInt(process.env.LOG_LINE_LIMIT, 120, 20, 500);
 
 if (!AUTH_DISABLED && !JWT_SECRET) {
@@ -56,6 +57,11 @@ function clampInt(value, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.trunc(number)));
 }
 
+function parsePort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : fallback;
+}
+
 function cleanBaseUrl(value) {
   return String(value || '').replace(/\/+$/, '');
 }
@@ -72,8 +78,11 @@ function parseList(value) {
 }
 
 function parseUniFiPrefixes() {
-  if (process.env.UNIFI_API_PREFIXES === undefined) return ['/proxy/network', ''];
-  return String(process.env.UNIFI_API_PREFIXES)
+  const settings = loadSettings();
+  if (process.env.UNIFI_API_PREFIXES === undefined && !Object.prototype.hasOwnProperty.call(settings, 'unifiApiPrefixes')) {
+    return ['/proxy/network', ''];
+  }
+  return String(settingValue('unifiApiPrefixes', 'UNIFI_API_PREFIXES', '/proxy/network,'))
     .split(',')
     .map(item => item.trim())
     .map(item => item === '/' ? '' : item);
@@ -353,6 +362,296 @@ function writeJsonAtomic(filePath, value) {
   fs.renameSync(tmpFile, filePath);
 }
 
+function loadSettings() {
+  try {
+    if (!fs.existsSync(SETTINGS_FILE)) return {};
+    const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8') || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (err) {
+    console.warn(`[settings] Could not load settings: ${err.message}`);
+    return {};
+  }
+}
+
+function writeSettings(settings) {
+  writeJsonAtomic(SETTINGS_FILE, settings);
+}
+
+function settingValue(key, envName, fallback = '') {
+  const settings = loadSettings();
+  if (Object.prototype.hasOwnProperty.call(settings, key)) return settings[key];
+  return process.env[envName] ?? fallback;
+}
+
+function stringSetting(key, envName, fallback = '', maxLength = 1000) {
+  return asText(settingValue(key, envName, fallback), maxLength);
+}
+
+function boolSetting(key, envName, fallback = false) {
+  return parseBool(settingValue(key, envName, fallback ? 'true' : 'false'), fallback);
+}
+
+function intSetting(key, envName, fallback, min, max) {
+  return clampInt(settingValue(key, envName, String(fallback)), fallback, min, max);
+}
+
+function publicSettings() {
+  const settings = loadSettings();
+  const hasWolBindPort = process.env.WOL_BIND_PORT !== undefined || Object.prototype.hasOwnProperty.call(settings, 'wolBindPort');
+  return {
+    nasPublicUrl: stringSetting('nasPublicUrl', 'NAS_PUBLIC_URL', '', 600),
+    nasDiskPaths: stringSetting('nasDiskPaths', 'NAS_DISK_PATHS', '/data,/host/mnt', 1200),
+    nasLogFiles: stringSetting('nasLogFiles', 'NAS_LOG_FILES', '', 2000),
+    homeAssistantUrl: stringSetting('homeAssistantUrl', 'HOME_ASSISTANT_URL', '', 600),
+    hasHomeAssistantToken: !!stringSetting('homeAssistantToken', 'HOME_ASSISTANT_TOKEN', '', 4000),
+    haLogbookHours: intSetting('haLogbookHours', 'HA_LOGBOOK_HOURS', 24, 1, 168),
+    unifiUrl: stringSetting('unifiUrl', 'UNIFI_URL', '', 600),
+    unifiUsername: stringSetting('unifiUsername', 'UNIFI_USERNAME', '', 160),
+    hasUnifiPassword: !!stringSetting('unifiPassword', 'UNIFI_PASSWORD', '', 1000),
+    hasUnifiApiKey: !!stringSetting('unifiApiKey', 'UNIFI_API_KEY', '', 4000),
+    unifiSite: stringSetting('unifiSite', 'UNIFI_SITE', 'default', 120) || 'default',
+    unifiInsecure: boolSetting('unifiInsecure', 'UNIFI_INSECURE', true),
+    unifiLoginPaths: stringSetting('unifiLoginPaths', 'UNIFI_LOGIN_PATHS', '/api/auth/login,/api/login', 500),
+    unifiApiPrefixes: stringSetting('unifiApiPrefixes', 'UNIFI_API_PREFIXES', '/proxy/network,', 500),
+    wolDefaultBroadcast: stringSetting('wolDefaultBroadcast', 'WOL_DEFAULT_BROADCAST', '255.255.255.255', 120) || '255.255.255.255',
+    wolDefaultPort: intSetting('wolDefaultPort', 'WOL_DEFAULT_PORT', 9, 0, 65535),
+    wolBindAddress: stringSetting('wolBindAddress', 'WOL_BIND_ADDRESS', '', 120),
+    wolBindPort: hasWolBindPort ? intSetting('wolBindPort', 'WOL_BIND_PORT', 0, 0, 65535) : '',
+  };
+}
+
+function updateSettings(raw = {}) {
+  const current = loadSettings();
+  const next = { ...current };
+  const textFields = [
+    ['nasPublicUrl', 600],
+    ['nasDiskPaths', 1200],
+    ['nasLogFiles', 2000],
+    ['homeAssistantUrl', 600],
+    ['unifiUrl', 600],
+    ['unifiUsername', 160],
+    ['unifiSite', 120],
+    ['unifiLoginPaths', 500],
+    ['unifiApiPrefixes', 500],
+    ['wolDefaultBroadcast', 120],
+    ['wolBindAddress', 120],
+  ];
+
+  for (const [key, maxLength] of textFields) {
+    if (raw[key] !== undefined) next[key] = asText(raw[key], maxLength);
+  }
+
+  if (raw.haLogbookHours !== undefined) next.haLogbookHours = intSettingFromRaw(raw.haLogbookHours, 24, 1, 168);
+  if (raw.unifiInsecure !== undefined) next.unifiInsecure = parseBool(raw.unifiInsecure, true);
+  if (raw.wolDefaultPort !== undefined) next.wolDefaultPort = parsePort(raw.wolDefaultPort, 9);
+  if (raw.wolBindPort !== undefined) {
+    const bindPortText = asText(raw.wolBindPort, 12);
+    next.wolBindPort = bindPortText === '' ? '' : parsePort(bindPortText, 0);
+  }
+
+  updateSecretSetting(next, raw, 'homeAssistantToken', 'clearHomeAssistantToken', 4000);
+  updateSecretSetting(next, raw, 'unifiPassword', 'clearUnifiPassword', 1000);
+  updateSecretSetting(next, raw, 'unifiApiKey', 'clearUnifiApiKey', 4000);
+
+  next.updatedAt = new Date().toISOString();
+  writeSettings(next);
+  return publicSettings();
+}
+
+function intSettingFromRaw(value, fallback, min, max) {
+  return clampInt(value, fallback, min, max);
+}
+
+function updateSecretSetting(next, raw, key, clearKey, maxLength) {
+  if (raw[clearKey]) {
+    next[key] = '';
+    return;
+  }
+  if (raw[key] !== undefined && asText(raw[key], maxLength)) {
+    next[key] = asText(raw[key], maxLength);
+  }
+}
+
+function normalizeMac(value) {
+  const compact = String(value || '').replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+  if (compact.length !== 12) return '';
+  return compact.match(/.{2}/g).join(':');
+}
+
+function macToBuffer(mac) {
+  const normalized = normalizeMac(mac);
+  if (!normalized) throw new Error('Invalid MAC address');
+  return Buffer.from(normalized.split(':').map(part => parseInt(part, 16)));
+}
+
+function normalizeDevice(raw = {}, existing = {}, options = {}) {
+  const now = new Date().toISOString();
+  const defaultBroadcast = stringSetting('wolDefaultBroadcast', 'WOL_DEFAULT_BROADCAST', '255.255.255.255', 120) || '255.255.255.255';
+  const defaultPort = intSetting('wolDefaultPort', 'WOL_DEFAULT_PORT', 9, 0, 65535);
+  const mac = normalizeMac(raw.mac ?? existing.mac);
+  if (!mac) throw new Error('A valid MAC address is required');
+
+  const name = asText(raw.name ?? existing.name, 100);
+  if (!name) throw new Error('Device name is required');
+
+  const createdAt = existing.createdAt || raw.createdAt || now;
+  return {
+    id: existing.id || safeId(raw.id || name || mac),
+    name,
+    mac,
+    broadcast: asText(raw.broadcast ?? existing.broadcast ?? defaultBroadcast, 120) || defaultBroadcast,
+    port: parsePort(raw.port ?? existing.port, defaultPort),
+    description: asText(raw.description ?? existing.description, 280),
+    tags: normalizeTags(raw.tags ?? existing.tags),
+    enabled: raw.enabled === undefined ? existing.enabled !== false : !!raw.enabled,
+    createdAt,
+    updatedAt: options.touch === false ? (raw.updatedAt || existing.updatedAt || createdAt) : now,
+    lastWakeAt: raw.lastWakeAt || existing.lastWakeAt || null,
+    lastWakeBy: raw.lastWakeBy || existing.lastWakeBy || '',
+  };
+}
+
+function parseDeviceSeed() {
+  if (!process.env.WOL_DEVICES) return [];
+  const parsed = JSON.parse(process.env.WOL_DEVICES);
+  const devices = Array.isArray(parsed) ? parsed : parsed.devices;
+  if (!Array.isArray(devices)) throw new Error('WOL_DEVICES must be a JSON array or { "devices": [] }');
+  return devices.map(device => normalizeDevice(device));
+}
+
+function loadWakeDevices() {
+  if (!fs.existsSync(WOL_DEVICES_FILE)) {
+    const seeded = parseDeviceSeed();
+    writeWakeDevices(seeded);
+    return seeded;
+  }
+
+  const parsed = JSON.parse(fs.readFileSync(WOL_DEVICES_FILE, 'utf8') || '[]');
+  const devices = Array.isArray(parsed) ? parsed : parsed.devices;
+  if (!Array.isArray(devices)) return [];
+
+  return devices
+    .map(device => {
+      try {
+        return normalizeDevice(device, {}, { touch: false });
+      } catch (err) {
+        console.warn(`[wol] Skipping invalid device: ${err.message}`);
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function writeWakeDevices(devices) {
+  writeJsonAtomic(WOL_DEVICES_FILE, devices);
+}
+
+function uniqueWakeDeviceId(devices, desiredId) {
+  const used = new Set(devices.map(device => device.id));
+  const base = safeId(desiredId);
+  if (!used.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const next = `${base}-${index}`;
+    if (!used.has(next)) return next;
+  }
+  return crypto.randomUUID();
+}
+
+function publicWakeDevice(device) {
+  return {
+    id: device.id,
+    name: device.name,
+    mac: device.mac,
+    broadcast: device.broadcast,
+    port: device.port,
+    description: device.description,
+    tags: device.tags,
+    enabled: device.enabled,
+    createdAt: device.createdAt,
+    updatedAt: device.updatedAt,
+    lastWakeAt: device.lastWakeAt,
+    lastWakeBy: device.lastWakeBy,
+  };
+}
+
+function buildMagicPacket(mac) {
+  const macBuffer = macToBuffer(mac);
+  const packet = Buffer.alloc(6 + (16 * macBuffer.length), 0xff);
+  for (let index = 0; index < 16; index += 1) {
+    macBuffer.copy(packet, 6 + (index * macBuffer.length));
+  }
+  return packet;
+}
+
+function sendWakePacket(device) {
+  const packet = buildMagicPacket(device.mac);
+  const socket = dgram.createSocket('udp4');
+  const bindOptions = {};
+  const bindAddress = stringSetting('wolBindAddress', 'WOL_BIND_ADDRESS', '', 120);
+  const bindPort = intSetting('wolBindPort', 'WOL_BIND_PORT', 0, 0, 65535);
+  if (bindAddress) bindOptions.address = bindAddress;
+  if (bindPort) bindOptions.port = bindPort;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => finish(new Error('Wake request timed out')), 5000);
+
+    function finish(err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.close();
+      if (err) reject(err);
+      else resolve();
+    }
+
+    socket.on('error', finish);
+    socket.bind(bindOptions, () => {
+      try {
+        socket.setBroadcast(true);
+      } catch (err) {
+        finish(err);
+        return;
+      }
+      socket.send(packet, 0, packet.length, device.port, device.broadcast, finish);
+    });
+  });
+}
+
+function readWakeLog(limit = 100) {
+  try {
+    if (!fs.existsSync(WAKE_LOG_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(WAKE_LOG_FILE, 'utf8') || '[]');
+    return Array.isArray(parsed) ? parsed.slice(0, limit) : [];
+  } catch {
+    return [];
+  }
+}
+
+function appendWakeLog(entry) {
+  const log = readWakeLog(200);
+  log.unshift(entry);
+  writeJsonAtomic(WAKE_LOG_FILE, log.slice(0, 200));
+}
+
+function collectWakeSnapshot() {
+  const devices = loadWakeDevices().map(publicWakeDevice);
+  const enabled = devices.filter(device => device.enabled).length;
+  const lastWakeAt = devices
+    .map(device => device.lastWakeAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || null;
+  return {
+    total: devices.length,
+    enabled,
+    disabled: devices.length - enabled,
+    lastWakeAt,
+    devices,
+    log: readWakeLog(80),
+  };
+}
+
 function parseSitesSeed() {
   const seeded = [];
   if (process.env.STATUS_SITES) {
@@ -365,14 +664,17 @@ function parseSitesSeed() {
     }
   }
 
-  if (process.env.NAS_PUBLIC_URL) {
-    seeded.push({ name: 'NAS', url: process.env.NAS_PUBLIC_URL, group: 'Home', kind: 'nas' });
+  const nasPublicUrl = stringSetting('nasPublicUrl', 'NAS_PUBLIC_URL', '', 600);
+  const homeAssistantUrl = stringSetting('homeAssistantUrl', 'HOME_ASSISTANT_URL', '', 600);
+  const unifiUrl = stringSetting('unifiUrl', 'UNIFI_URL', '', 600);
+  if (nasPublicUrl) {
+    seeded.push({ name: 'NAS', url: nasPublicUrl, group: 'Home', kind: 'nas' });
   }
-  if (process.env.HOME_ASSISTANT_URL) {
-    seeded.push({ name: 'Home Assistant', url: process.env.HOME_ASSISTANT_URL, group: 'Home', kind: 'homeassistant' });
+  if (homeAssistantUrl) {
+    seeded.push({ name: 'Home Assistant', url: homeAssistantUrl, group: 'Home', kind: 'homeassistant' });
   }
-  if (process.env.UNIFI_URL) {
-    seeded.push({ name: 'UniFi Network', url: process.env.UNIFI_URL, group: 'Network', kind: 'unifi' });
+  if (unifiUrl) {
+    seeded.push({ name: 'UniFi Network', url: unifiUrl, group: 'Network', kind: 'unifi' });
   }
 
   const used = new Set();
@@ -631,7 +933,7 @@ function parseNetwork(procRoot) {
 }
 
 async function collectDiskUsage() {
-  const paths = parseList(process.env.NAS_DISK_PATHS || '/data,/host/mnt,/');
+  const paths = parseList(stringSetting('nasDiskPaths', 'NAS_DISK_PATHS', '/data,/host/mnt,/', 1200).replace(/\n/g, ','));
   const seen = new Set();
   const rows = [];
 
@@ -752,7 +1054,8 @@ function tailFile(filePath, maxLines = LOG_LINE_LIMIT, maxBytes = 180 * 1024) {
 }
 
 function collectNasLogs() {
-  const files = parseList(process.env.NAS_LOG_FILES).length ? parseList(process.env.NAS_LOG_FILES) : defaultNasLogFiles();
+  const configuredFiles = parseList(stringSetting('nasLogFiles', 'NAS_LOG_FILES', '', 2000).replace(/\n/g, ','));
+  const files = configuredFiles.length ? configuredFiles : defaultNasLogFiles();
   const seen = new Set();
   return files
     .filter(file => {
@@ -797,8 +1100,8 @@ async function collectNasSnapshot() {
 }
 
 async function haJson(pathname, maxBytes = 1024 * 1024) {
-  const baseUrl = cleanBaseUrl(process.env.HOME_ASSISTANT_URL || '');
-  const token = process.env.HOME_ASSISTANT_TOKEN || '';
+  const baseUrl = cleanBaseUrl(stringSetting('homeAssistantUrl', 'HOME_ASSISTANT_URL', '', 600));
+  const token = stringSetting('homeAssistantToken', 'HOME_ASSISTANT_TOKEN', '', 4000);
   const response = await requestJson(resolveUrl(baseUrl, pathname), {
     headers: { Authorization: `Bearer ${token}` },
     timeoutMs: API_TIMEOUT_MS,
@@ -809,8 +1112,8 @@ async function haJson(pathname, maxBytes = 1024 * 1024) {
 }
 
 async function haText(pathname, maxBytes = 512 * 1024) {
-  const baseUrl = cleanBaseUrl(process.env.HOME_ASSISTANT_URL || '');
-  const token = process.env.HOME_ASSISTANT_TOKEN || '';
+  const baseUrl = cleanBaseUrl(stringSetting('homeAssistantUrl', 'HOME_ASSISTANT_URL', '', 600));
+  const token = stringSetting('homeAssistantToken', 'HOME_ASSISTANT_TOKEN', '', 4000);
   const response = await requestText(resolveUrl(baseUrl, pathname), {
     headers: { Authorization: `Bearer ${token}` },
     timeoutMs: API_TIMEOUT_MS,
@@ -864,8 +1167,8 @@ function tailText(text, maxLines = LOG_LINE_LIMIT) {
 }
 
 async function collectHomeAssistant() {
-  const baseUrl = cleanBaseUrl(process.env.HOME_ASSISTANT_URL || '');
-  const token = process.env.HOME_ASSISTANT_TOKEN || '';
+  const baseUrl = cleanBaseUrl(stringSetting('homeAssistantUrl', 'HOME_ASSISTANT_URL', '', 600));
+  const token = stringSetting('homeAssistantToken', 'HOME_ASSISTANT_TOKEN', '', 4000);
   if (!baseUrl || !token) {
     return {
       configured: false,
@@ -880,7 +1183,8 @@ async function collectHomeAssistant() {
   }
 
   const now = new Date();
-  const start = new Date(now.getTime() - HA_LOGBOOK_HOURS * 60 * 60 * 1000).toISOString();
+  const haLogbookHours = intSetting('haLogbookHours', 'HA_LOGBOOK_HOURS', 24, 1, 168);
+  const start = new Date(now.getTime() - haLogbookHours * 60 * 60 * 1000).toISOString();
   const end = now.toISOString();
   const logbookPath = `/api/logbook/${encodeURIComponent(start)}?end_time=${encodeURIComponent(end)}`;
 
@@ -1012,16 +1316,18 @@ function slimUnifiEvent(event) {
 }
 
 async function collectUniFi() {
-  const baseUrl = cleanBaseUrl(process.env.UNIFI_URL || '');
-  const username = process.env.UNIFI_USERNAME || '';
-  const password = process.env.UNIFI_PASSWORD || '';
-  const apiKey = process.env.UNIFI_API_KEY || '';
+  const baseUrl = cleanBaseUrl(stringSetting('unifiUrl', 'UNIFI_URL', '', 600));
+  const username = stringSetting('unifiUsername', 'UNIFI_USERNAME', '', 160);
+  const password = stringSetting('unifiPassword', 'UNIFI_PASSWORD', '', 1000);
+  const apiKey = stringSetting('unifiApiKey', 'UNIFI_API_KEY', '', 4000);
+  const unifiSite = stringSetting('unifiSite', 'UNIFI_SITE', 'default', 120) || 'default';
+  const unifiInsecure = boolSetting('unifiInsecure', 'UNIFI_INSECURE', true);
   if (!baseUrl || (!apiKey && (!username || !password))) {
     return {
       configured: false,
       ok: false,
       baseUrl,
-      site: UNIFI_SITE,
+      site: unifiSite,
       error: !baseUrl ? 'UNIFI_URL is not set' : 'UniFi credentials are not set',
       endpoints: [],
       health: [],
@@ -1041,7 +1347,7 @@ async function collectUniFi() {
   }
 
   if (username && password) {
-    const loginPaths = parseList(process.env.UNIFI_LOGIN_PATHS || '/api/auth/login,/api/login');
+    const loginPaths = parseList(stringSetting('unifiLoginPaths', 'UNIFI_LOGIN_PATHS', '/api/auth/login,/api/login', 500));
     let loggedIn = false;
     let lastError = '';
     for (const loginPath of loginPaths) {
@@ -1051,7 +1357,7 @@ async function collectUniFi() {
           json: { username, password, remember: true },
           timeoutMs: API_TIMEOUT_MS,
           maxBytes: 512 * 1024,
-          insecure: UNIFI_INSECURE,
+          insecure: unifiInsecure,
           headers: authHeaders,
         });
         cookieJar.add(response.headers['set-cookie']);
@@ -1066,7 +1372,7 @@ async function collectUniFi() {
       }
     }
     if (!loggedIn && !apiKey) {
-      return { configured: true, ok: false, baseUrl, site: UNIFI_SITE, error: `UniFi login failed: ${lastError}`, endpoints: [] };
+      return { configured: true, ok: false, baseUrl, site: unifiSite, error: `UniFi login failed: ${lastError}`, endpoints: [] };
     }
   }
 
@@ -1085,7 +1391,7 @@ async function collectUniFi() {
 
     for (const prefix of prefixes) {
       const prefixClean = prefix.replace(/\/+$/, '');
-      const pathname = `${prefixClean}/api/s/${encodeURIComponent(UNIFI_SITE)}/${resource}`.replace(/^\/?/, '/');
+      const pathname = `${prefixClean}/api/s/${encodeURIComponent(unifiSite)}/${resource}`.replace(/^\/?/, '/');
       for (const method of methods) {
         try {
           const response = await requestJson(resolveUrl(baseUrl, pathname), {
@@ -1094,7 +1400,7 @@ async function collectUniFi() {
             headers: currentHeaders(),
             timeoutMs: API_TIMEOUT_MS,
             maxBytes: options.maxBytes || 2 * 1024 * 1024,
-            insecure: UNIFI_INSECURE,
+            insecure: unifiInsecure,
           });
           cookieJar.add(response.headers['set-cookie']);
           csrfToken = headerValue(response.headers, 'x-csrf-token') || csrfToken;
@@ -1131,7 +1437,7 @@ async function collectUniFi() {
     configured: true,
     ok,
     baseUrl,
-    site: UNIFI_SITE,
+    site: unifiSite,
     collectedAt: new Date().toISOString(),
     sysinfo,
     health,
@@ -1151,11 +1457,12 @@ async function collectUniFi() {
 }
 
 async function collectDashboard() {
-  const [nas, homeAssistant, unifi, sites] = await Promise.all([
+  const [nas, homeAssistant, unifi, sites, wake] = await Promise.all([
     collectNasSnapshot().catch(err => ({ configured: true, ok: false, error: err.message })),
     collectHomeAssistant().catch(err => ({ configured: true, ok: false, error: err.message })),
     collectUniFi().catch(err => ({ configured: true, ok: false, error: err.message })),
     checkAllSites().catch(err => ({ total: 0, up: 0, down: 0, disabled: 0, sites: [], error: err.message })),
+    Promise.resolve().then(() => collectWakeSnapshot()).catch(err => ({ total: 0, enabled: 0, disabled: 0, devices: [], log: [], error: err.message })),
   ]);
 
   return {
@@ -1165,6 +1472,7 @@ async function collectDashboard() {
     homeAssistant,
     unifi,
     sites,
+    wake,
   };
 }
 
@@ -1290,6 +1598,18 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user, app: { name: APP_NAME, label: APP_LABEL } });
 });
 
+app.get('/api/settings', requireAuth, requireAdmin, (_req, res) => {
+  res.json({ settings: publicSettings() });
+});
+
+app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
+  try {
+    res.json({ settings: updateSettings(req.body || {}) });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Could not save settings' });
+  }
+});
+
 app.get('/api/dashboard', requireAuth, async (_req, res) => {
   res.json(await collectDashboard());
 });
@@ -1312,6 +1632,87 @@ app.get('/api/sites', requireAuth, (_req, res) => {
 
 app.get('/api/sites/status', requireAuth, async (_req, res) => {
   res.json(await checkAllSites());
+});
+
+app.get('/api/wol/devices', requireAuth, (_req, res) => {
+  res.json({ devices: loadWakeDevices().map(publicWakeDevice) });
+});
+
+app.post('/api/wol/devices', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const devices = loadWakeDevices();
+    const device = normalizeDevice(req.body);
+    device.id = uniqueWakeDeviceId(devices, req.body?.id || device.name);
+    devices.push(device);
+    writeWakeDevices(devices);
+    res.status(201).json({ device: publicWakeDevice(device) });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Could not create device' });
+  }
+});
+
+app.put('/api/wol/devices/:id', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const devices = loadWakeDevices();
+    const index = devices.findIndex(device => device.id === req.params.id);
+    if (index === -1) return res.status(404).json({ error: 'Device not found' });
+    const device = normalizeDevice({ ...devices[index], ...req.body, id: devices[index].id }, devices[index]);
+    devices[index] = device;
+    writeWakeDevices(devices);
+    return res.json({ device: publicWakeDevice(device) });
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'Could not update device' });
+  }
+});
+
+app.delete('/api/wol/devices/:id', requireAuth, requireAdmin, (req, res) => {
+  const devices = loadWakeDevices();
+  const nextDevices = devices.filter(device => device.id !== req.params.id);
+  if (nextDevices.length === devices.length) return res.status(404).json({ error: 'Device not found' });
+  writeWakeDevices(nextDevices);
+  return res.json({ ok: true });
+});
+
+app.post('/api/wol/devices/:id/wake', requireAuth, async (req, res) => {
+  const devices = loadWakeDevices();
+  const index = devices.findIndex(device => device.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Device not found' });
+
+  const device = devices[index];
+  if (!device.enabled) return res.status(409).json({ error: 'Device is disabled' });
+
+  const logBase = {
+    at: new Date().toISOString(),
+    deviceId: device.id,
+    deviceName: device.name,
+    mac: device.mac,
+    broadcast: device.broadcast,
+    port: device.port,
+    username: req.user.username,
+    displayName: req.user.display_name || req.user.username,
+  };
+
+  try {
+    await sendWakePacket(device);
+    const updatedAt = new Date().toISOString();
+    devices[index] = {
+      ...device,
+      lastWakeAt: logBase.at,
+      lastWakeBy: req.user.display_name || req.user.username,
+      updatedAt,
+    };
+    writeWakeDevices(devices);
+    appendWakeLog({ ...logBase, ok: true });
+    return res.json({ ok: true, device: publicWakeDevice(devices[index]) });
+  } catch (err) {
+    console.error(`[wol] Failed to wake ${device.name}:`, err.message);
+    appendWakeLog({ ...logBase, ok: false, error: err.message });
+    return res.status(502).json({ error: `Could not send wake packet: ${err.message}` });
+  }
+});
+
+app.get('/api/wol/wake-log', requireAuth, (_req, res) => {
+  res.json({ entries: readWakeLog(100) });
 });
 
 app.post('/api/sites', requireAuth, requireAdmin, (req, res) => {
@@ -1371,7 +1772,7 @@ app.get('/api/logs', requireAuth, async (_req, res) => {
   });
 });
 
-app.get(['/', '/nas', '/home-assistant', '/unifi', '/sites', '/logs'], requireAuth, (_req, res) => {
+app.get(['/', '/nas', '/home-assistant', '/unifi', '/wake', '/sites', '/logs', '/settings'], requireAuth, (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 

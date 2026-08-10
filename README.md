@@ -23,6 +23,10 @@ Required environment:
 | `NAS_DISK_PATHS` | Comma-separated paths to run `df` against |
 | `NAS_LOG_FILES` | Optional comma-separated log files; otherwise common Linux/macOS NAS logs are auto-detected |
 | `DOCKER_SOCKET` | Optional Docker socket path for container status |
+| `WOL_DEFAULT_BROADCAST` | Default Wake-on-LAN broadcast address, defaults to `255.255.255.255` |
+| `WOL_DEFAULT_PORT` | Default Wake-on-LAN UDP port, defaults to `9` |
+| `WOL_BIND_ADDRESS` / `WOL_BIND_PORT` | Optional local UDP bind settings for wake packets |
+| `WOL_DEVICES` | Optional JSON seed for first-run wake machines |
 | `HOME_ASSISTANT_URL` / `HOME_ASSISTANT_TOKEN` | Home Assistant REST API access |
 | `UNIFI_URL` / `UNIFI_USERNAME` / `UNIFI_PASSWORD` | UniFi Network local controller access |
 | `UNIFI_API_KEY` | Optional API key header for controller setups that support it |
@@ -32,6 +36,25 @@ Required environment:
 | `STATUS_SITES` | JSON array used to seed the Sites page |
 
 Home Assistant uses its REST API for states, logbook, events, services, system health, and error log. UniFi uses the local Network application API style because it exposes the broadest status and log surface for a NAS-local dashboard; newer official UniFi API docs are also available inside UniFi Network under Settings > Integrations.
+
+Admins can change NAS disk paths/log files, Home Assistant URL/token, UniFi URL/credentials/API key, and WOL defaults from the Settings page. Saved settings live in `DATA_DIR/settings.json` and override environment defaults without rebuilding the container.
+
+## Wake-on-LAN
+
+Admins can add wake machines from the Wake page. Every signed-in user with ChempBoard access can send wake packets for enabled machines.
+
+Each machine stores:
+
+| Field | Example |
+| --- | --- |
+| `name` | `Studio PC` |
+| `mac` | `AA:BB:CC:DD:EE:FF` |
+| `broadcast` | `10.13.37.255` |
+| `port` | `9` |
+| `tags` | `["studio"]` |
+| `enabled` | `true` |
+
+If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255`. If that still does not work, run the app on host networking or add the machine on the same L2 network as the container host.
 
 ## Local Run
 
