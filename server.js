@@ -1335,6 +1335,56 @@ function unifiMessage(json) {
   return json?.meta?.msg || json?.meta?.rc || json?.message || '';
 }
 
+function siteManagerApiBaseUrl(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    if (url.hostname === 'unifi.ui.com') return 'https://api.ui.com';
+    if (url.hostname === 'api.ui.com') return cleanBaseUrl(baseUrl);
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function slimUniFiSite(site) {
+  const meta = site?.meta && typeof site.meta === 'object' ? site.meta : {};
+  const name = asText(site?.name || meta.name || site?.site_name || site?.siteName || site?.siteId || site?.id || '', 160);
+  const label = asText(site?.desc || meta.desc || site?.description || site?.displayName || name || site?.siteId || site?.id || '', 180);
+  if (!name && !label) return null;
+  return {
+    name: name || label,
+    label: label || name,
+    siteId: asText(site?.siteId || site?._id || site?.id || '', 180),
+    hostId: asText(site?.hostId || site?.host_id || '', 220),
+    role: asText(site?.role || site?.permission || '', 80),
+    source: site?.meta ? 'site-manager' : 'network',
+  };
+}
+
+function uniqueUniFiSites(sites, fallbackSite) {
+  const rows = [];
+  const seen = new Set();
+  for (const site of sites) {
+    const normalized = slimUniFiSite(site);
+    if (!normalized) continue;
+    const key = normalized.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(normalized);
+  }
+  if (fallbackSite && !seen.has(String(fallbackSite).toLowerCase())) {
+    rows.unshift({
+      name: fallbackSite,
+      label: fallbackSite,
+      siteId: '',
+      hostId: '',
+      role: '',
+      source: 'configured',
+    });
+  }
+  return rows;
+}
+
 function slimUnifiDevice(device) {
   return {
     name: device.name || device.hostname || device.model || device.mac || '',
@@ -1386,6 +1436,7 @@ async function collectUniFi() {
       ok: false,
       baseUrl,
       site: unifiSite,
+      sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite }], unifiSite),
       error: !baseUrl ? 'UNIFI_URL is not set' : 'UniFi credentials are not set',
       endpoints: [],
       health: [],
@@ -1430,7 +1481,15 @@ async function collectUniFi() {
       }
     }
     if (!loggedIn && !apiKey) {
-      return { configured: true, ok: false, baseUrl, site: unifiSite, error: `UniFi login failed: ${lastError}`, endpoints: [] };
+      return {
+        configured: true,
+        ok: false,
+        baseUrl,
+        site: unifiSite,
+        sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite }], unifiSite),
+        error: `UniFi login failed: ${lastError}`,
+        endpoints: [],
+      };
     }
   }
 
@@ -1440,6 +1499,60 @@ async function collectUniFi() {
     if (cookie) headers.Cookie = cookie;
     if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
     return headers;
+  }
+
+  async function requestUniFiJson(urlString, options = {}) {
+    const response = await requestJson(urlString, {
+      method: options.method || 'GET',
+      json: options.json,
+      headers: currentHeaders(),
+      timeoutMs: API_TIMEOUT_MS,
+      maxBytes: options.maxBytes || 2 * 1024 * 1024,
+      insecure: unifiInsecure,
+    });
+    cookieJar.add(response.headers['set-cookie']);
+    csrfToken = headerValue(response.headers, 'x-csrf-token') || csrfToken;
+    if (response.status >= 400 || response.json?.meta?.rc === 'error') throw httpStatusError(options.label || 'UniFi', response);
+    return response;
+  }
+
+  async function collectUniFiSites() {
+    let lastError = null;
+    for (const prefix of parseUniFiPrefixes()) {
+      const prefixClean = prefix.replace(/\/+$/, '');
+      const pathname = `${prefixClean}/api/self/sites`.replace(/^\/?/, '/');
+      try {
+        const response = await requestUniFiJson(resolveUrl(baseUrl, pathname), { label: `UniFi ${pathname}` });
+        const sites = uniqueUniFiSites(unifiData(response.json), unifiSite);
+        if (sites.length) return { sites, endpoint: { name: 'sites', ok: true, path: pathname } };
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    const managerBaseUrl = siteManagerApiBaseUrl(baseUrl);
+    if (managerBaseUrl && apiKey) {
+      const pathname = '/ea/sites';
+      try {
+        const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathname), {
+          label: `UniFi ${pathname}`,
+          maxBytes: 4 * 1024 * 1024,
+        });
+        const sites = uniqueUniFiSites(unifiData(response.json), unifiSite);
+        if (sites.length) return { sites, endpoint: { name: 'sites', ok: true, path: `${managerBaseUrl}${pathname}` } };
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    return {
+      sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite }], unifiSite),
+      endpoint: {
+        name: 'sites',
+        ok: false,
+        error: lastError?.message || 'No UniFi sites endpoint returned rows',
+      },
+    };
   }
 
   async function callUniFi(resource, options = {}) {
@@ -1452,17 +1565,12 @@ async function collectUniFi() {
       const pathname = `${prefixClean}/api/s/${encodeURIComponent(unifiSite)}/${resource}`.replace(/^\/?/, '/');
       for (const method of methods) {
         try {
-          const response = await requestJson(resolveUrl(baseUrl, pathname), {
+          const response = await requestUniFiJson(resolveUrl(baseUrl, pathname), {
             method,
             json: method === 'POST' ? options.body : undefined,
-            headers: currentHeaders(),
-            timeoutMs: API_TIMEOUT_MS,
             maxBytes: options.maxBytes || 2 * 1024 * 1024,
-            insecure: unifiInsecure,
+            label: `UniFi ${pathname}`,
           });
-          cookieJar.add(response.headers['set-cookie']);
-          csrfToken = headerValue(response.headers, 'x-csrf-token') || csrfToken;
-          if (response.status >= 400 || response.json?.meta?.rc === 'error') throw httpStatusError(`UniFi ${pathname}`, response);
           return { path: pathname, json: response.json };
         } catch (err) {
           lastError = err;
@@ -1472,6 +1580,7 @@ async function collectUniFi() {
     throw lastError || new Error(`UniFi ${resource} failed`);
   }
 
+  const siteResult = await collectUniFiSites();
   const names = ['health', 'sysinfo', 'devices', 'clients', 'events', 'alarms'];
   const calls = await Promise.allSettled([
     callUniFi('stat/health'),
@@ -1488,14 +1597,16 @@ async function collectUniFi() {
   const clients = unifiData(settledValue(calls[3], {}).json || settledValue(calls[3], {})).map(slimUnifiClient);
   const events = unifiData(settledValue(calls[4], {}).json || settledValue(calls[4], {})).map(slimUnifiEvent).slice(0, 120);
   const alarms = unifiData(settledValue(calls[5], {}).json || settledValue(calls[5], {})).map(slimUnifiEvent).slice(0, 120);
-  const endpoints = names.map((name, index) => endpointResult(name, calls[index]));
-  const ok = endpoints.some(endpoint => endpoint.ok);
+  const dataEndpoints = names.map((name, index) => endpointResult(name, calls[index]));
+  const endpoints = [siteResult.endpoint, ...dataEndpoints];
+  const ok = dataEndpoints.some(endpoint => endpoint.ok);
 
   return {
     configured: true,
     ok,
     baseUrl,
     site: unifiSite,
+    sites: siteResult.sites,
     collectedAt: new Date().toISOString(),
     sysinfo,
     health,

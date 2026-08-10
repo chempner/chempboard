@@ -296,6 +296,15 @@
     .log-panel h2 {
       font-size: 1.18rem;
     }
+    .control-panel {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .inline-field {
+      min-width: min(24rem, 100%);
+    }
     .dashboard-layout,
     .split-layout {
       display: grid;
@@ -535,6 +544,7 @@
       .topbar-actions { width: 100%; justify-content: space-between; }
       .nav-links { width: 100%; }
       .page-title { align-items: flex-start; flex-direction: column; }
+      .control-panel { align-items: stretch; flex-direction: column; }
       .page-actions { width: 100%; justify-content: stretch; }
       .page-actions > * { flex: 1 1 auto; }
       .resource-grid, .log-grid { grid-template-columns: 1fr; }
@@ -837,7 +847,10 @@
         bindWakeButtons();
       }
       if (state.route === 'homeassistant') content.innerHTML = renderHomeAssistant();
-      if (state.route === 'unifi') content.innerHTML = renderUniFi();
+      if (state.route === 'unifi') {
+        content.innerHTML = renderUniFi();
+        bindUniFiControls();
+      }
       if (state.route === 'sites') {
         content.innerHTML = renderSites();
         bindSiteButtons();
@@ -1028,6 +1041,18 @@
       if (!unifi.configured) return `<div class="empty-state">${escapeHtml(unifi.error || 'UniFi Network is not configured.')}</div>`;
       return `
         <div class="page-stack">
+          <section class="panel control-panel">
+            <div>
+              <h2>Site</h2>
+              <p>${escapeHtml(siteLabel(unifi.site, unifi.sites))} - ${(unifi.sites || []).length || 1} discovered</p>
+            </div>
+            <label class="inline-field">
+              <span>UniFi site</span>
+              <select id="unifi-site-picker" ${state.user?.is_admin ? '' : 'disabled'}>
+                ${renderUniFiSiteOptions(unifi.site, unifi.sites)}
+              </select>
+            </label>
+          </section>
           <div class="stats-grid">
             ${statCard('Clients', String(unifi.clients?.total || 0), `Site ${unifi.site || '-'}`, 'cyan')}
             ${statCard('Devices', String(unifi.devices?.total || 0), `${unifi.devices?.offline || 0} offline`, (unifi.devices?.offline || 0) ? 'amber' : 'green')}
@@ -1066,6 +1091,52 @@
           </div>
         </div>
       `;
+    }
+
+    function normalizedUniFiSites(sites, currentSite) {
+      const rows = Array.isArray(sites) ? sites : [];
+      const seen = new Set();
+      const normalized = [];
+      for (const site of rows) {
+        const name = String(site?.name || '').trim();
+        if (!name || seen.has(name.toLowerCase())) continue;
+        seen.add(name.toLowerCase());
+        normalized.push({
+          name,
+          label: String(site?.label || name).trim() || name,
+          siteId: String(site?.siteId || '').trim(),
+          hostId: String(site?.hostId || '').trim(),
+          role: String(site?.role || '').trim(),
+        });
+      }
+      const current = String(currentSite || 'default').trim() || 'default';
+      if (!seen.has(current.toLowerCase())) {
+        normalized.unshift({ name: current, label: current, siteId: '', hostId: '', role: '' });
+      }
+      return normalized;
+    }
+
+    function siteLabel(currentSite, sites) {
+      const current = String(currentSite || 'default');
+      const site = normalizedUniFiSites(sites, current).find(item => item.name === current);
+      return site ? `${site.label}${site.label !== site.name ? ` (${site.name})` : ''}` : current;
+    }
+
+    function renderUniFiSiteOptions(currentSite, sites) {
+      const current = String(currentSite || 'default');
+      return normalizedUniFiSites(sites, current).map(site => {
+        const details = [site.name !== site.label ? site.name : '', site.role].filter(Boolean).join(' - ');
+        const label = details ? `${site.label} (${details})` : site.label;
+        return `<option value="${escapeHtml(site.name)}" ${site.name === current ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('');
+    }
+
+    function renderUniFiSiteSetting(currentSite) {
+      const sites = normalizedUniFiSites(state.data?.unifi?.sites, currentSite);
+      if (sites.length <= 1 && !state.data?.unifi?.sites?.length) {
+        return `<input name="unifiSite" value="${escapeHtml(currentSite || 'default')}" />`;
+      }
+      return `<select name="unifiSite">${renderUniFiSiteOptions(currentSite, sites)}</select>`;
     }
 
     function renderSites() {
@@ -1172,7 +1243,7 @@
             </label>
             <label>
               <span>Site</span>
-              <input name="unifiSite" value="${escapeHtml(settings.unifiSite || 'default')}" />
+              ${renderUniFiSiteSetting(settings.unifiSite || 'default')}
             </label>
             <label class="check-label">
               <input name="unifiInsecure" type="checkbox" ${settings.unifiInsecure === false ? '' : 'checked'} />
@@ -1338,6 +1409,34 @@
         if (row[key] !== undefined) parts.push(`${key.replace('num_', '')}: ${row[key]}`);
       }
       return parts.join(' - ');
+    }
+
+    function bindUniFiControls() {
+      const picker = document.getElementById('unifi-site-picker');
+      if (!picker) return;
+      picker.addEventListener('change', saveUniFiSite);
+    }
+
+    async function saveUniFiSite(event) {
+      if (!state.user?.is_admin) return;
+      const picker = event.currentTarget;
+      const nextSite = picker.value;
+      const previousSite = state.data?.unifi?.site || state.settings?.unifiSite || 'default';
+      if (!nextSite || nextSite === previousSite) return;
+      picker.disabled = true;
+      showNotice('');
+      try {
+        const saved = await api('/api/settings', {
+          method: 'PUT',
+          body: JSON.stringify({ unifiSite: nextSite }),
+        });
+        state.settings = saved.settings;
+        await refreshDashboard({ quiet: true });
+      } catch (error) {
+        picker.value = previousSite;
+        showNotice(error.message);
+        render();
+      }
     }
 
     function bindSettingsForm() {
