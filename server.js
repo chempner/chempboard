@@ -1499,6 +1499,19 @@ function networkIntegrationSiteKey(site) {
   return asText(site?.id || site?._id || site?.siteId || site?.site_id || site?.name || site?.internalReference || '', 180);
 }
 
+function networkIntegrationSiteCandidates(site) {
+  return uniqueTextValues([
+    site?.id,
+    site?._id,
+    site?.siteId,
+    site?.site_id,
+    site?.internalReference,
+    site?.name,
+    site?.shortname,
+    site?.meta?.name,
+  ], 180);
+}
+
 function networkIntegrationSiteName(site) {
   return asText(site?.name || site?.meta?.name || site?.siteName || site?.site_name || site?.displayName || site?.description || '', 160);
 }
@@ -1622,16 +1635,37 @@ function slimSiteManagerDevice(device) {
 }
 
 function slimUnifiClient(client) {
+  const isWired = client.is_wired === true || client.isWired === true || client.type === 'WIRED' || client.radio === 'wired';
+  const network = client.network_name || client.networkName || client.network || client.vlan_name || client.vlanName || client.usergroup_name || client.userGroupName || client.vlan || '';
+  const essid = client.essid || client.ssid || client.wlan || client.wlan_name || client.wlanName || '';
   return {
-    name: client.hostname || client.name || client.mac || '',
-    mac: client.mac || '',
-    ip: client.ip || '',
-    network: client.network || client.network_name || '',
-    radio: client.radio || '',
-    essid: client.essid || '',
-    uptime: client.uptime || null,
-    rxBytes: client.rx_bytes || client.bytes_r || 0,
-    txBytes: client.tx_bytes || client.bytes_t || 0,
+    name: client.hostname || client.name || client.displayName || client.mac || client._id || '',
+    mac: client.mac || client.macAddress || '',
+    ip: client.ip || client.ip_address || client.ipAddress || '',
+    network: network ? String(network) : '',
+    radio: client.radio || client.radio_proto || client.radioProto || (isWired ? 'Wired' : essid ? 'Wireless' : ''),
+    essid,
+    uptime: client.uptime || client._uptime || client.assoc_time || null,
+    rxBytes: firstFiniteNumber([
+      client.rx_bytes,
+      client.rxBytes,
+      client.bytes_r,
+      client['bytes-r'],
+      client.wired_rx_bytes,
+      client['wired-rx_bytes'],
+      client.downloadBytes,
+      nestedValue(client, ['traffic.rxBytes', 'traffic.rx_bytes', 'statistics.rxBytes']),
+    ]),
+    txBytes: firstFiniteNumber([
+      client.tx_bytes,
+      client.txBytes,
+      client.bytes_t,
+      client['bytes-t'],
+      client.wired_tx_bytes,
+      client['wired-tx_bytes'],
+      client.uploadBytes,
+      nestedValue(client, ['traffic.txBytes', 'traffic.tx_bytes', 'statistics.txBytes']),
+    ]),
   };
 }
 
@@ -1685,7 +1719,7 @@ function summarizeUniFiOverview({ devices, clients, health, events, alarms, endp
     devicesOffline: Math.max(0, (devices || []).length - onlineDevices),
     deviceTypes: countBy(devices, device => device.type || device.model).slice(0, 8),
     deviceVersions: countBy(devices, device => device.version).slice(0, 8),
-    clientNetworks: countBy(clients, client => client.network || client.essid).slice(0, 8),
+    clientNetworks: countBy(clients, client => client.network || client.essid || client.radio).slice(0, 8),
     clientRadios: countBy(clients, client => client.radio || (client.essid ? 'Wireless' : 'Wired')).slice(0, 8),
     clientSsids: countBy(clients, client => client.essid).filter(item => item.name !== 'Unknown').slice(0, 8),
     clientTraffic: { rxBytes: totalRxBytes, txBytes: totalTxBytes },
@@ -2001,14 +2035,13 @@ async function collectUniFi() {
     const siteCandidates = [...configuredSiteIds];
     const selectedNames = uniqueTextValues([unifiSite, 'default'], 160).map(value => value.toLowerCase());
     for (const site of siteRows) {
-      const id = networkIntegrationSiteKey(site);
+      const ids = networkIntegrationSiteCandidates(site);
       const name = networkIntegrationSiteName(site);
-      if (!id) continue;
-      if (!name || selectedNames.includes(name.toLowerCase()) || id === unifiSiteId || id === unifiSite) siteCandidates.push(id);
+      const matchesSelected = !name || selectedNames.includes(name.toLowerCase()) || ids.includes(unifiSiteId) || ids.includes(unifiSite);
+      if (matchesSelected) siteCandidates.push(...ids);
     }
     for (const site of siteRows) {
-      const id = networkIntegrationSiteKey(site);
-      if (id) siteCandidates.push(id);
+      siteCandidates.push(...networkIntegrationSiteCandidates(site));
     }
 
     const siteIds = uniqueTextValues(siteCandidates, 180);
@@ -2026,7 +2059,7 @@ async function collectUniFi() {
                   `${managerBaseUrl}${basePath}`,
                 );
                 endpoints.push(result.endpoint);
-                if (result.clients.length) return { ...result, endpoints };
+                if (result.clients.length) return { ...result, endpoints, siteCandidates: siteIds };
                 emptySuccesses.push(result);
               } catch (err) {
                 lastError = err;
@@ -2049,7 +2082,7 @@ async function collectUniFi() {
               basePath,
             );
             endpoints.push(result.endpoint);
-            if (result.clients.length) return { ...result, endpoints };
+            if (result.clients.length) return { ...result, endpoints, siteCandidates: siteIds };
             emptySuccesses.push(result);
           } catch (err) {
             lastError = err;
@@ -2060,11 +2093,12 @@ async function collectUniFi() {
 
     if (emptySuccesses.length) {
       const best = emptySuccesses[0];
-      return { ...best, endpoints };
+      return { ...best, endpoints, siteCandidates: siteIds };
     }
 
     return {
       clients: [],
+      siteCandidates: siteIds,
       endpoints: endpoints.length ? endpoints : undefined,
       endpoint: {
         name: 'network clients',
@@ -2075,10 +2109,10 @@ async function collectUniFi() {
     };
   }
 
-  async function collectConnectorLegacyClients() {
+  async function collectConnectorLegacyClients(extraSiteNames = []) {
     if (!apiKey || !unifiHostId) return { clients: [], endpoint: null };
-    const siteNames = uniqueTextValues([unifiSite, 'default', unifiSiteId], 180);
-    const resources = ['stat/sta', 'stat/alluser'];
+    const siteNames = uniqueTextValues([unifiSite, 'default', unifiSiteId, ...extraSiteNames], 180);
+    const resources = ['stat/sta', 'stat/alluser', 'rest/user', 'list/user'];
     const endpoints = [];
     const emptySuccesses = [];
     let lastError = null;
@@ -2147,7 +2181,7 @@ async function collectUniFi() {
   const siteResult = await collectUniFiSites();
   const siteManagerDeviceResult = await collectSiteManagerDevices();
   const networkClientResult = await collectNetworkIntegrationClients();
-  const connectorLegacyClientResult = await collectConnectorLegacyClients();
+  const connectorLegacyClientResult = await collectConnectorLegacyClients(networkClientResult.siteCandidates || []);
   const names = ['health', 'sysinfo', 'devices', 'legacy clients', 'events', 'alarms'];
   const calls = await Promise.allSettled([
     callUniFi('stat/health'),
