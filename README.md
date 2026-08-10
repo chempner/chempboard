@@ -33,11 +33,13 @@ Required environment:
 | `UNIFI_URL` / `UNIFI_USERNAME` / `UNIFI_PASSWORD` | UniFi Network local controller access |
 | `UNIFI_API_KEY` | Optional API key header for controller setups that support it |
 | `UNIFI_SITE` | UniFi site name, usually `default`; admins can pick discovered sites in the UI |
+| `UNIFI_HOST_ID` / `UNIFI_SITE_ID` | Optional Site Manager identifiers for distinguishing several consoles that all have a `default` Network site |
+| `UNIFI_SITE_MANAGER_URL` | Optional Site Manager API base override; defaults to `https://api.ui.com` |
 | `UNIFI_LOGIN_PATHS` | Login paths to try, defaults to UniFi OS then classic controller |
 | `UNIFI_API_PREFIXES` | API path prefixes to try, defaults to `/proxy/network` then classic root |
 | `STATUS_SITES` | JSON array used to seed the Sites page |
 
-Home Assistant uses its REST API for states, logbook, events, services, system health, and error log. UniFi uses the local Network application API style because it exposes the broadest status and log surface for a NAS-local dashboard; the UniFi page discovers available sites from UniFi and lets admins choose the active site. Newer official UniFi API docs are also available inside UniFi Network under Settings > Integrations.
+Home Assistant uses its REST API for states, logbook, events, services, system health, and error log. UniFi uses the local Network application API style because it exposes the broadest status and log surface for a NAS-local dashboard; with a Site Manager API key, the UniFi page also asks Site Manager for hosts/sites so admins can choose between consoles even when every Network site is named `default`. Newer official UniFi API docs are also available inside UniFi Network under Settings > Integrations.
 
 Admins can change NAS disk paths/log files, Home Assistant URL/token, UniFi URL/credentials/API key, and WOL defaults from the Settings page. Saved settings live in `DATA_DIR/settings.json` and override environment defaults without rebuilding the container.
 

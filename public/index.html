@@ -1044,12 +1044,12 @@
           <section class="panel control-panel">
             <div>
               <h2>Site</h2>
-              <p>${escapeHtml(siteLabel(unifi.site, unifi.sites))} - ${(unifi.sites || []).length || 1} discovered</p>
+              <p>${escapeHtml(siteLabel(unifi.site, unifi.sites, unifi.siteKey))} - ${(unifi.sites || []).length || 1} discovered</p>
             </div>
             <label class="inline-field">
               <span>UniFi site</span>
               <select id="unifi-site-picker" ${state.user?.is_admin ? '' : 'disabled'}>
-                ${renderUniFiSiteOptions(unifi.site, unifi.sites)}
+                ${renderUniFiSiteOptions(unifi.site, unifi.sites, unifi.siteKey)}
               </select>
             </label>
           </section>
@@ -1093,50 +1093,75 @@
       `;
     }
 
-    function normalizedUniFiSites(sites, currentSite) {
+    function unifiSiteKey(name, hostId, siteId) {
+      const siteName = String(name || 'default').trim() || 'default';
+      const host = String(hostId || '').trim();
+      const site = String(siteId || '').trim();
+      return `${host || 'local'}::${site}::${siteName}`;
+    }
+
+    function normalizedUniFiSites(sites, currentSite, currentKey) {
       const rows = Array.isArray(sites) ? sites : [];
       const seen = new Set();
       const normalized = [];
       for (const site of rows) {
         const name = String(site?.name || '').trim();
-        if (!name || seen.has(name.toLowerCase())) continue;
-        seen.add(name.toLowerCase());
+        const hostId = String(site?.hostId || '').trim();
+        const siteId = String(site?.siteId || '').trim();
+        const key = String(site?.key || unifiSiteKey(name, hostId, siteId)).trim();
+        if (!name || !key || seen.has(key.toLowerCase())) continue;
+        seen.add(key.toLowerCase());
         normalized.push({
+          key,
           name,
           label: String(site?.label || name).trim() || name,
-          siteId: String(site?.siteId || '').trim(),
-          hostId: String(site?.hostId || '').trim(),
+          siteId,
+          hostId,
+          hostName: String(site?.hostName || '').trim(),
           role: String(site?.role || '').trim(),
+          source: String(site?.source || '').trim(),
         });
       }
       const current = String(currentSite || 'default').trim() || 'default';
-      if (!seen.has(current.toLowerCase())) {
-        normalized.unshift({ name: current, label: current, siteId: '', hostId: '', role: '' });
+      const fallbackKey = String(currentKey || unifiSiteKey(current, state.data?.unifi?.hostId || state.settings?.unifiHostId, state.data?.unifi?.siteId || state.settings?.unifiSiteId)).trim();
+      if (!seen.has(fallbackKey.toLowerCase())) {
+        normalized.unshift({
+          key: fallbackKey,
+          name: current,
+          label: current,
+          siteId: state.data?.unifi?.siteId || state.settings?.unifiSiteId || '',
+          hostId: state.data?.unifi?.hostId || state.settings?.unifiHostId || '',
+          hostName: '',
+          role: '',
+          source: 'configured',
+        });
       }
       return normalized;
     }
 
-    function siteLabel(currentSite, sites) {
+    function siteLabel(currentSite, sites, currentKey) {
       const current = String(currentSite || 'default');
-      const site = normalizedUniFiSites(sites, current).find(item => item.name === current);
+      const sitesList = normalizedUniFiSites(sites, current, currentKey);
+      const site = sitesList.find(item => item.key === currentKey) || sitesList.find(item => item.name === current);
       return site ? `${site.label}${site.label !== site.name ? ` (${site.name})` : ''}` : current;
     }
 
-    function renderUniFiSiteOptions(currentSite, sites) {
+    function renderUniFiSiteOptions(currentSite, sites, currentKey) {
       const current = String(currentSite || 'default');
-      return normalizedUniFiSites(sites, current).map(site => {
-        const details = [site.name !== site.label ? site.name : '', site.role].filter(Boolean).join(' - ');
+      const selectedKey = currentKey || unifiSiteKey(current, state.data?.unifi?.hostId || state.settings?.unifiHostId, state.data?.unifi?.siteId || state.settings?.unifiSiteId);
+      return normalizedUniFiSites(sites, current, selectedKey).map(site => {
+        const details = [site.name !== site.label ? site.name : '', site.role, site.source === 'site-manager' ? 'Site Manager' : ''].filter(Boolean).join(' - ');
         const label = details ? `${site.label} (${details})` : site.label;
-        return `<option value="${escapeHtml(site.name)}" ${site.name === current ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+        return `<option value="${escapeHtml(site.key)}" data-name="${escapeHtml(site.name)}" data-host-id="${escapeHtml(site.hostId)}" data-site-id="${escapeHtml(site.siteId)}" ${site.key === selectedKey ? 'selected' : ''}>${escapeHtml(label)}</option>`;
       }).join('');
     }
 
-    function renderUniFiSiteSetting(currentSite) {
-      const sites = normalizedUniFiSites(state.data?.unifi?.sites, currentSite);
+    function renderUniFiSiteSetting(currentSite, currentKey) {
+      const sites = normalizedUniFiSites(state.data?.unifi?.sites, currentSite, currentKey);
       if (sites.length <= 1 && !state.data?.unifi?.sites?.length) {
         return `<input name="unifiSite" value="${escapeHtml(currentSite || 'default')}" />`;
       }
-      return `<select name="unifiSite">${renderUniFiSiteOptions(currentSite, sites)}</select>`;
+      return `<select name="unifiSite">${renderUniFiSiteOptions(currentSite, sites, currentKey)}</select>`;
     }
 
     function renderSites() {
@@ -1243,7 +1268,7 @@
             </label>
             <label>
               <span>Site</span>
-              ${renderUniFiSiteSetting(settings.unifiSite || 'default')}
+              ${renderUniFiSiteSetting(settings.unifiSite || 'default', unifiSiteKey(settings.unifiSite || 'default', settings.unifiHostId || '', settings.unifiSiteId || ''))}
             </label>
             <label class="check-label">
               <input name="unifiInsecure" type="checkbox" ${settings.unifiInsecure === false ? '' : 'checked'} />
@@ -1469,23 +1494,43 @@
     async function saveUniFiSite(event) {
       if (!state.user?.is_admin) return;
       const picker = event.currentTarget;
-      const nextSite = picker.value;
-      const previousSite = state.data?.unifi?.site || state.settings?.unifiSite || 'default';
-      if (!nextSite || nextSite === previousSite) return;
+      const nextSite = uniFiSitePayloadFromControl(picker);
+      const previousKey = state.data?.unifi?.siteKey || unifiSiteKey(state.settings?.unifiSite || 'default', state.settings?.unifiHostId || '', state.settings?.unifiSiteId || '');
+      if (!nextSite.unifiSite || picker.value === previousKey) return;
       picker.disabled = true;
       showNotice('');
       try {
         const saved = await api('/api/settings', {
           method: 'PUT',
-          body: JSON.stringify({ unifiSite: nextSite }),
+          body: JSON.stringify(nextSite),
         });
         state.settings = saved.settings;
         await refreshDashboard({ quiet: true });
       } catch (error) {
-        picker.value = previousSite;
+        picker.value = previousKey;
         showNotice(error.message);
         render();
       }
+    }
+
+    function uniFiSitePayloadFromControl(control) {
+      const selected = control?.selectedOptions?.[0] || null;
+      if (selected) {
+        return {
+          unifiSite: selected.dataset.name || 'default',
+          unifiHostId: selected.dataset.hostId || '',
+          unifiSiteId: selected.dataset.siteId || '',
+        };
+      }
+
+      const name = String(control?.value || 'default').trim() || 'default';
+      const existingName = String(state.settings?.unifiSite || 'default').trim() || 'default';
+      const keepExistingIds = name === existingName;
+      return {
+        unifiSite: name,
+        unifiHostId: keepExistingIds ? state.settings?.unifiHostId || '' : '',
+        unifiSiteId: keepExistingIds ? state.settings?.unifiSiteId || '' : '',
+      };
     }
 
     function bindSettingsForm() {
@@ -1504,6 +1549,7 @@
       button.disabled = true;
 
       const field = name => form.elements.namedItem(name);
+      const unifiSite = uniFiSitePayloadFromControl(field('unifiSite'));
       const payload = {
         nasPublicUrl: field('nasPublicUrl').value,
         nasDiskPaths: normalizePathList(field('nasDiskPaths').value),
@@ -1518,7 +1564,7 @@
         clearUnifiPassword: field('clearUnifiPassword').checked,
         unifiApiKey: field('unifiApiKey').value,
         clearUnifiApiKey: field('clearUnifiApiKey').checked,
-        unifiSite: field('unifiSite').value,
+        ...unifiSite,
         unifiInsecure: field('unifiInsecure').checked,
         unifiLoginPaths: field('unifiLoginPaths').value,
         unifiApiPrefixes: field('unifiApiPrefixes').value,

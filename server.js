@@ -411,6 +411,8 @@ function publicSettings() {
     hasUnifiPassword: !!stringSetting('unifiPassword', 'UNIFI_PASSWORD', '', 1000),
     hasUnifiApiKey: !!stringSetting('unifiApiKey', 'UNIFI_API_KEY', '', 4000),
     unifiSite: stringSetting('unifiSite', 'UNIFI_SITE', 'default', 120) || 'default',
+    unifiHostId: stringSetting('unifiHostId', 'UNIFI_HOST_ID', '', 220),
+    unifiSiteId: stringSetting('unifiSiteId', 'UNIFI_SITE_ID', '', 180),
     unifiInsecure: boolSetting('unifiInsecure', 'UNIFI_INSECURE', true),
     unifiLoginPaths: stringSetting('unifiLoginPaths', 'UNIFI_LOGIN_PATHS', '/api/auth/login,/api/login', 500),
     unifiApiPrefixes: stringSetting('unifiApiPrefixes', 'UNIFI_API_PREFIXES', '/proxy/network,', 500),
@@ -434,6 +436,8 @@ function updateSettings(raw = {}) {
     ['unifiUrl', 600],
     ['unifiUsername', 160],
     ['unifiSite', 120],
+    ['unifiHostId', 220],
+    ['unifiSiteId', 180],
     ['unifiLoginPaths', 500],
     ['unifiApiPrefixes', 500],
     ['wolDefaultBroadcast', 120],
@@ -1445,38 +1449,110 @@ function siteManagerApiBaseUrl(baseUrl) {
   return '';
 }
 
-function slimUniFiSite(site) {
-  const meta = site?.meta && typeof site.meta === 'object' ? site.meta : {};
-  const name = asText(site?.name || meta.name || site?.site_name || site?.siteName || site?.siteId || site?.id || '', 160);
-  const label = asText(site?.desc || meta.desc || site?.description || site?.displayName || name || site?.siteId || site?.id || '', 180);
-  if (!name && !label) return null;
+function siteManagerApiBaseUrls(baseUrl) {
+  const override = cleanBaseUrl(process.env.UNIFI_SITE_MANAGER_URL || '');
+  const urls = [
+    override,
+    siteManagerApiBaseUrl(baseUrl),
+    'https://api.ui.com',
+  ].filter(Boolean);
+  return [...new Set(urls.map(cleanBaseUrl))];
+}
+
+function nestedValue(source, paths) {
+  for (const pathSpec of paths) {
+    const parts = pathSpec.split('.');
+    let value = source;
+    for (const part of parts) {
+      value = value && typeof value === 'object' ? value[part] : undefined;
+    }
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return '';
+}
+
+function slimUniFiHost(host) {
+  const id = asText(host?.id || host?.hostId || host?.hardwareId || '', 220);
+  if (!id) return null;
+  const label = asText(nestedValue(host, [
+    'name',
+    'hostName',
+    'hostname',
+    'meta.name',
+    'meta.desc',
+    'userData.name',
+    'userData.hostName',
+    'userData.hostname',
+    'reportedState.name',
+    'reportedState.hostName',
+    'reportedState.hostname',
+    'reportedState.systemInfo.name',
+    'reportedState.systemInfo.hostname',
+    'hardwareId',
+  ]), 180) || id;
   return {
-    name: name || label,
-    label: label || name,
-    siteId: asText(site?.siteId || site?._id || site?.id || '', 180),
-    hostId: asText(site?.hostId || site?.host_id || '', 220),
-    role: asText(site?.role || site?.permission || '', 80),
-    source: site?.meta ? 'site-manager' : 'network',
+    id,
+    label,
+    type: asText(host?.type || host?.hostType || '', 80),
   };
 }
 
-function uniqueUniFiSites(sites, fallbackSite) {
+function uniFiSiteKey(site) {
+  const hostId = asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220);
+  const siteId = asText(site?.siteId || site?.site_id || site?._id || site?.id || site?.meta?.id || '', 180);
+  const name = asText(site?.name || site?.siteName || site?.site_name || site?.meta?.name || 'default', 160) || 'default';
+  return `${hostId || 'local'}::${siteId || ''}::${name}`;
+}
+
+function slimUniFiSite(site) {
+  const meta = site?.meta && typeof site.meta === 'object' ? site.meta : {};
+  const name = asText(site?.name || meta.name || site?.site_name || site?.siteName || 'default', 160) || 'default';
+  const hostId = asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220);
+  const siteId = asText(site?.siteId || site?.site_id || site?._id || site?.id || meta.id || '', 180);
+  const hostName = asText(site?.hostName || site?.hostLabel || site?.consoleName || nestedValue(site, [
+    'host.name',
+    'host.displayName',
+    'host.hostName',
+    'host.meta.name',
+    'console.name',
+    'console.displayName',
+    'meta.hostName',
+  ]), 180);
+  const siteLabel = asText(site?.desc || meta.desc || site?.description || site?.displayName || name || siteId, 180);
+  const label = [hostName, siteLabel].filter(Boolean).join(' / ') || siteLabel || name;
+  if (!name && !label) return null;
+  return {
+    key: uniFiSiteKey({ name, hostId, siteId }),
+    name: name || label,
+    label: label || name,
+    siteId,
+    hostId,
+    hostName,
+    role: asText(site?.role || site?.permission || '', 80),
+    source: asText(site?.source || (site?.meta ? 'site-manager' : 'network'), 80),
+  };
+}
+
+function uniqueUniFiSites(sites, fallbackSite, fallbackHostId = '', fallbackSiteId = '') {
   const rows = [];
   const seen = new Set();
   for (const site of sites) {
     const normalized = slimUniFiSite(site);
     if (!normalized) continue;
-    const key = normalized.name.toLowerCase();
+    const key = normalized.key.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     rows.push(normalized);
   }
-  if (fallbackSite && !seen.has(String(fallbackSite).toLowerCase())) {
+  const fallbackKey = uniFiSiteKey({ name: fallbackSite, hostId: fallbackHostId, siteId: fallbackSiteId });
+  if (fallbackSite && !seen.has(fallbackKey.toLowerCase())) {
     rows.unshift({
+      key: fallbackKey,
       name: fallbackSite,
       label: fallbackSite,
-      siteId: '',
-      hostId: '',
+      siteId: fallbackSiteId,
+      hostId: fallbackHostId,
+      hostName: '',
       role: '',
       source: 'configured',
     });
@@ -1493,6 +1569,21 @@ function slimUnifiDevice(device) {
     ip: device.ip || device.ip_address || '',
     state: device.state,
     version: device.version || '',
+    uptime: device.uptime || null,
+    adopted: device.adopted,
+  };
+}
+
+function slimSiteManagerDevice(device) {
+  const status = String(device.status || device.state || '').toLowerCase();
+  return {
+    name: device.name || device.displayName || device.hostname || device.model || device.mac || '',
+    type: device.type || device.deviceType || '',
+    model: device.model || device.productLine || '',
+    mac: device.mac || device.macAddress || '',
+    ip: device.ip || device.ipAddress || '',
+    state: ['online', 'connected', '1'].includes(status) ? 1 : 0,
+    version: device.version || device.firmwareVersion || '',
     uptime: device.uptime || null,
     adopted: device.adopted,
   };
@@ -1528,6 +1619,9 @@ async function collectUniFi() {
   const password = stringSetting('unifiPassword', 'UNIFI_PASSWORD', '', 1000);
   const apiKey = stringSetting('unifiApiKey', 'UNIFI_API_KEY', '', 4000);
   const unifiSite = stringSetting('unifiSite', 'UNIFI_SITE', 'default', 120) || 'default';
+  const unifiHostId = stringSetting('unifiHostId', 'UNIFI_HOST_ID', '', 220);
+  const unifiSiteId = stringSetting('unifiSiteId', 'UNIFI_SITE_ID', '', 180);
+  const selectedSiteKey = uniFiSiteKey({ name: unifiSite, hostId: unifiHostId, siteId: unifiSiteId });
   const unifiInsecure = boolSetting('unifiInsecure', 'UNIFI_INSECURE', true);
   if (!baseUrl || (!apiKey && (!username || !password))) {
     return {
@@ -1535,7 +1629,10 @@ async function collectUniFi() {
       ok: false,
       baseUrl,
       site: unifiSite,
-      sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite }], unifiSite),
+      siteKey: selectedSiteKey,
+      hostId: unifiHostId,
+      siteId: unifiSiteId,
+      sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite, hostId: unifiHostId, siteId: unifiSiteId }], unifiSite, unifiHostId, unifiSiteId),
       error: !baseUrl ? 'UNIFI_URL is not set' : 'UniFi credentials are not set',
       endpoints: [],
       health: [],
@@ -1585,7 +1682,10 @@ async function collectUniFi() {
         ok: false,
         baseUrl,
         site: unifiSite,
-        sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite }], unifiSite),
+        siteKey: selectedSiteKey,
+        hostId: unifiHostId,
+        siteId: unifiSiteId,
+        sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite, hostId: unifiHostId, siteId: unifiSiteId }], unifiSite, unifiHostId, unifiSiteId),
         error: `UniFi login failed: ${lastError}`,
         endpoints: [],
       };
@@ -1616,41 +1716,102 @@ async function collectUniFi() {
   }
 
   async function collectUniFiSites() {
+    const rows = [];
+    const endpoints = [];
     let lastError = null;
+
     for (const prefix of parseUniFiPrefixes()) {
       const prefixClean = prefix.replace(/\/+$/, '');
       const pathname = `${prefixClean}/api/self/sites`.replace(/^\/?/, '/');
       try {
         const response = await requestUniFiJson(resolveUrl(baseUrl, pathname), { label: `UniFi ${pathname}` });
-        const sites = uniqueUniFiSites(unifiData(response.json), unifiSite);
-        if (sites.length) return { sites, endpoint: { name: 'sites', ok: true, path: pathname } };
+        const localSites = unifiData(response.json).map(site => ({ ...site, source: 'network' }));
+        rows.push(...localSites);
+        endpoints.push({ name: 'local sites', ok: true, path: pathname, count: localSites.length });
       } catch (err) {
         lastError = err;
+        endpoints.push({ name: 'local sites', ok: false, path: pathname, error: err.message, status: err.status || null });
       }
     }
 
-    const managerBaseUrl = siteManagerApiBaseUrl(baseUrl);
-    if (managerBaseUrl && apiKey) {
-      const pathname = '/ea/sites';
+    if (apiKey) {
+      for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
+        const hostsById = new Map();
+        try {
+          const pathname = '/ea/hosts';
+          const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathname), {
+            label: `UniFi ${pathname}`,
+            maxBytes: 4 * 1024 * 1024,
+          });
+          const hosts = unifiData(response.json).map(slimUniFiHost).filter(Boolean);
+          for (const host of hosts) hostsById.set(host.id, host);
+          endpoints.push({ name: 'site manager hosts', ok: true, path: `${managerBaseUrl}${pathname}`, count: hosts.length });
+        } catch (err) {
+          lastError = err;
+          endpoints.push({ name: 'site manager hosts', ok: false, path: `${managerBaseUrl}/ea/hosts`, error: err.message, status: err.status || null });
+        }
+
+        try {
+          const pathname = '/ea/sites';
+          const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathname), {
+            label: `UniFi ${pathname}`,
+            maxBytes: 4 * 1024 * 1024,
+          });
+          const managerSites = unifiData(response.json).map(site => {
+            const hostId = asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220);
+            const host = hostsById.get(hostId);
+            return { ...site, hostName: site?.hostName || site?.hostLabel || host?.label || '', source: 'site-manager' };
+          });
+          rows.push(...managerSites);
+          endpoints.push({ name: 'site manager sites', ok: true, path: `${managerBaseUrl}${pathname}`, count: managerSites.length });
+        } catch (err) {
+          lastError = err;
+          endpoints.push({ name: 'site manager sites', ok: false, path: `${managerBaseUrl}/ea/sites`, error: err.message, status: err.status || null });
+        }
+      }
+    }
+
+    const sites = uniqueUniFiSites(rows, unifiSite, unifiHostId, unifiSiteId);
+    return {
+      sites,
+      endpoints: endpoints.length ? endpoints : [{
+        name: 'sites',
+        ok: false,
+        error: lastError?.message || 'No UniFi sites endpoint was checked',
+      }],
+    };
+  }
+
+  async function collectSiteManagerDevices() {
+    if (!apiKey || !unifiHostId) return { devices: [], endpoint: null };
+    let lastError = null;
+
+    for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
+      const query = new URLSearchParams();
+      query.append('hostIds[]', unifiHostId);
+      const pathname = `/v1/devices?${query.toString()}`;
       try {
         const response = await requestUniFiJson(resolveUrl(managerBaseUrl, pathname), {
-          label: `UniFi ${pathname}`,
-          maxBytes: 4 * 1024 * 1024,
+          label: 'UniFi Site Manager devices',
+          maxBytes: 6 * 1024 * 1024,
         });
-        const sites = uniqueUniFiSites(unifiData(response.json), unifiSite);
-        if (sites.length) return { sites, endpoint: { name: 'sites', ok: true, path: `${managerBaseUrl}${pathname}` } };
+        const rows = [];
+        for (const item of unifiData(response.json)) {
+          if (Array.isArray(item?.devices)) rows.push(...item.devices);
+          else rows.push(item);
+        }
+        return {
+          devices: rows.map(slimSiteManagerDevice),
+          endpoint: { name: 'site manager devices', ok: true, path: `${managerBaseUrl}${pathname}`, count: rows.length },
+        };
       } catch (err) {
         lastError = err;
       }
     }
 
     return {
-      sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite }], unifiSite),
-      endpoint: {
-        name: 'sites',
-        ok: false,
-        error: lastError?.message || 'No UniFi sites endpoint returned rows',
-      },
+      devices: [],
+      endpoint: { name: 'site manager devices', ok: false, error: lastError?.message || 'No Site Manager device data', status: lastError?.status || null },
     };
   }
 
@@ -1680,6 +1841,7 @@ async function collectUniFi() {
   }
 
   const siteResult = await collectUniFiSites();
+  const siteManagerDeviceResult = await collectSiteManagerDevices();
   const names = ['health', 'sysinfo', 'devices', 'clients', 'events', 'alarms'];
   const calls = await Promise.allSettled([
     callUniFi('stat/health'),
@@ -1692,19 +1854,23 @@ async function collectUniFi() {
 
   const health = unifiData(settledValue(calls[0], {}).json || settledValue(calls[0], {}));
   const sysinfo = unifiData(settledValue(calls[1], {}).json || settledValue(calls[1], {}))[0] || null;
-  const devices = unifiData(settledValue(calls[2], {}).json || settledValue(calls[2], {})).map(slimUnifiDevice);
+  const localDevices = unifiData(settledValue(calls[2], {}).json || settledValue(calls[2], {})).map(slimUnifiDevice);
+  const devices = unifiHostId && siteManagerDeviceResult.endpoint?.ok ? siteManagerDeviceResult.devices : localDevices;
   const clients = unifiData(settledValue(calls[3], {}).json || settledValue(calls[3], {})).map(slimUnifiClient);
   const events = unifiData(settledValue(calls[4], {}).json || settledValue(calls[4], {})).map(slimUnifiEvent).slice(0, 120);
   const alarms = unifiData(settledValue(calls[5], {}).json || settledValue(calls[5], {})).map(slimUnifiEvent).slice(0, 120);
   const dataEndpoints = names.map((name, index) => endpointResult(name, calls[index]));
-  const endpoints = [siteResult.endpoint, ...dataEndpoints];
-  const ok = dataEndpoints.some(endpoint => endpoint.ok);
+  const endpoints = [...siteResult.endpoints, ...dataEndpoints, ...(siteManagerDeviceResult.endpoint ? [siteManagerDeviceResult.endpoint] : [])];
+  const ok = endpoints.some(endpoint => endpoint.ok);
 
   return {
     configured: true,
     ok,
     baseUrl,
     site: unifiSite,
+    siteKey: selectedSiteKey,
+    hostId: unifiHostId,
+    siteId: unifiSiteId,
     sites: siteResult.sites,
     collectedAt: new Date().toISOString(),
     sysinfo,
