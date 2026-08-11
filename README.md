@@ -37,7 +37,7 @@ Required environment:
 | `UNIFI_SITE_MANAGER_URL` | Optional Site Manager API base override; defaults to `https://api.ui.com` |
 | `UNIFI_LOGIN_PATHS` | Login paths to try, defaults to UniFi OS then classic controller |
 | `UNIFI_API_PREFIXES` | API path prefixes to try, defaults to `/proxy/network` then classic root |
-| `STATUS_SITES` | JSON array used to seed the Sites page |
+| `STATUS_SITES` | JSON array used to seed the Status checks page |
 
 Home Assistant uses its REST API for states, logbook, events, services, system health, and error log. UniFi uses the local Network application API style because it exposes the broadest status and log surface for a NAS-local dashboard; with a Site Manager API key, the UniFi page also asks the documented Site Manager `/v1/hosts` and `/v1/sites` endpoints so admins can choose between consoles even when every Network site is named `default`. Connected clients are collected from the official Network Integration `/v1/sites/{siteId}/clients` endpoint using the UUID returned by Network Integration `/v1/sites`; legacy endpoints such as `api/s/default/stat/sta` use the site's `internalReference` instead. If UniFi returns summary counts through Site Manager but does not return detailed client rows, ChempBoard shows the Site Manager client count clearly as summary-only data.
 
@@ -58,7 +58,7 @@ Each machine stores:
 | `tags` | `["studio"]` |
 | `enabled` | `true` |
 
-For GPTWOL-style setups, enter the machine IP, for example `10.13.37.33`. ChempBoard sends a true unicast packet to that IP, a legacy broadcast-flag packet to the same IP, an inferred `/24` directed broadcast such as `10.13.37.255`, and the configured default broadcast such as `255.255.255.255`. It records every UDP send attempt and runs a short TCP check on the configured port so the Wake page can show whether the machine looks awake.
+For GPTWOL/ChempWOL-style setups, enter the machine IP, for example `10.13.37.33`. ChempBoard first mirrors ChempWOL by enabling `SO_BROADCAST` and sending the magic packet to that exact saved target. It then also tries a true unicast packet, an inferred `/24` directed broadcast such as `10.13.37.255`, and the configured default broadcast such as `255.255.255.255`. It records every UDP send attempt and runs a short TCP check on the configured port so the Wake page can show whether the machine looks awake.
 
 If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255` or the host-network compose file below.
 

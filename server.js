@@ -63,6 +63,16 @@ function parsePort(value, fallback) {
   return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : fallback;
 }
 
+function parseWakeTarget(value) {
+  const first = String(value || '').split(/[\n,]/)[0].trim();
+  const match = /^([0-9]{1,3}(?:\.[0-9]{1,3}){3})(?::(\d{1,5}))?$/.exec(first);
+  if (!match) return { host: first, port: null };
+  return {
+    host: match[1],
+    port: match[2] === undefined ? null : parsePort(match[2], null),
+  };
+}
+
 function cleanBaseUrl(value) {
   return String(value || '').replace(/\/+$/, '');
 }
@@ -495,8 +505,11 @@ function macToBuffer(mac) {
 
 function normalizeDevice(raw = {}, existing = {}, options = {}) {
   const now = new Date().toISOString();
-  const defaultBroadcast = stringSetting('wolDefaultBroadcast', 'WOL_DEFAULT_BROADCAST', '255.255.255.255', 120) || '255.255.255.255';
+  const defaultBroadcast = parseWakeTarget(stringSetting('wolDefaultBroadcast', 'WOL_DEFAULT_BROADCAST', '255.255.255.255', 120)).host || '255.255.255.255';
   const defaultPort = intSetting('wolDefaultPort', 'WOL_DEFAULT_PORT', 9, 0, 65535);
+  const parsedTarget = parseWakeTarget(raw.broadcast ?? existing.broadcast ?? defaultBroadcast);
+  const rawPort = raw.port ?? existing.port;
+  const portValue = rawPort === undefined || rawPort === null || rawPort === '' ? (parsedTarget.port ?? undefined) : rawPort;
   const mac = normalizeMac(raw.mac ?? existing.mac);
   if (!mac) throw new Error('A valid MAC address is required');
 
@@ -508,8 +521,8 @@ function normalizeDevice(raw = {}, existing = {}, options = {}) {
     id: existing.id || safeId(raw.id || name || mac),
     name,
     mac,
-    broadcast: asText(raw.broadcast ?? existing.broadcast ?? defaultBroadcast, 120) || defaultBroadcast,
-    port: parsePort(raw.port ?? existing.port, defaultPort),
+    broadcast: asText(parsedTarget.host, 120) || defaultBroadcast,
+    port: parsePort(portValue, defaultPort),
     description: asText(raw.description ?? existing.description, 280),
     tags: normalizeTags(raw.tags ?? existing.tags),
     enabled: raw.enabled === undefined ? existing.enabled !== false : !!raw.enabled,
@@ -633,9 +646,11 @@ function isUnicastTarget(target) {
 }
 
 function wakeTargetsForDevice(device) {
-  const extraTargets = parseList(stringSetting('wolExtraBroadcasts', 'WOL_EXTRA_BROADCASTS', '', 1200).replace(/\n/g, ','));
-  const defaultBroadcast = stringSetting('wolDefaultBroadcast', 'WOL_DEFAULT_BROADCAST', '255.255.255.255', 120) || '255.255.255.255';
-  const targetTexts = [device.broadcast, inferDirectedBroadcast(device.broadcast), defaultBroadcast, ...extraTargets]
+  const extraTargets = parseList(stringSetting('wolExtraBroadcasts', 'WOL_EXTRA_BROADCASTS', '', 1200).replace(/\n/g, ','))
+    .map(target => parseWakeTarget(target).host);
+  const defaultBroadcast = parseWakeTarget(stringSetting('wolDefaultBroadcast', 'WOL_DEFAULT_BROADCAST', '255.255.255.255', 120)).host || '255.255.255.255';
+  const primaryTarget = parseWakeTarget(device.broadcast).host;
+  const targetTexts = [inferDirectedBroadcast(primaryTarget), defaultBroadcast, ...extraTargets]
     .map(target => asText(target, 120))
     .filter(Boolean);
   const targets = [];
@@ -648,10 +663,16 @@ function wakeTargetsForDevice(device) {
     targets.push({ target, mode });
   }
 
+  // First send mirrors ChempWOL/GPTWOL exactly: SO_BROADCAST enabled to the saved target.
+  if (primaryTarget) {
+    add(primaryTarget, 'gptwol');
+    if (isUnicastTarget(primaryTarget)) add(primaryTarget, 'unicast');
+  }
+
   for (const target of targetTexts) {
+    if (target === primaryTarget) continue;
     if (isUnicastTarget(target)) {
       add(target, 'unicast');
-      add(target, 'legacy');
     } else {
       add(target, 'broadcast');
     }
@@ -669,6 +690,10 @@ function wakeCheckTargetForDevice(device) {
   };
 }
 
+function wakeModeUsesBroadcastFlag(mode) {
+  return mode !== 'unicast';
+}
+
 function sendWakePacketToTarget(device, target, mode) {
   const packet = buildMagicPacket(device.mac);
   const socket = dgram.createSocket('udp4');
@@ -682,18 +707,18 @@ function sendWakePacketToTarget(device, target, mode) {
     let settled = false;
     const timeout = setTimeout(() => finish(new Error('Wake request timed out')), 5000);
 
-    function finish(err) {
+    function finish(err, result) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       socket.close();
       if (err) reject(err);
-      else resolve();
+      else resolve(result);
     }
 
     socket.on('error', finish);
     socket.bind(bindOptions, () => {
-      if (mode !== 'unicast') {
+      if (wakeModeUsesBroadcastFlag(mode)) {
         try {
           socket.setBroadcast(true);
         } catch (err) {
@@ -701,7 +726,11 @@ function sendWakePacketToTarget(device, target, mode) {
           return;
         }
       }
-      socket.send(packet, 0, packet.length, device.port, target, finish);
+      const local = socket.address();
+      socket.send(packet, 0, packet.length, device.port, target, err => {
+        if (err) finish(err);
+        else finish(null, { bytes: packet.length, localAddress: local.address, localPort: local.port });
+      });
     });
   });
 }
@@ -756,8 +785,11 @@ async function sendWakePacket(device) {
         at: new Date().toISOString(),
       };
       try {
-        await sendWakePacketToTarget(device, target, mode);
+        const result = await sendWakePacketToTarget(device, target, mode);
         attempt.ok = true;
+        if (result?.bytes) attempt.bytes = result.bytes;
+        if (result?.localAddress) attempt.localAddress = result.localAddress;
+        if (result?.localPort !== undefined) attempt.localPort = result.localPort;
       } catch (err) {
         attempt.error = err.message;
       }

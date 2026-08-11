@@ -571,7 +571,7 @@
         <button class="nav-link" data-route="wake" type="button">Wake</button>
         <button class="nav-link" data-route="homeassistant" type="button">Home Assistant</button>
         <button class="nav-link" data-route="unifi" type="button">UniFi</button>
-        <button class="nav-link" data-route="sites" type="button">Sites</button>
+        <button class="nav-link" data-route="sites" type="button">Status</button>
         <button class="nav-link" data-route="logs" type="button">Logs</button>
         <button class="nav-link hidden" data-route="settings" data-admin-route="true" type="button">Settings</button>
       </nav>
@@ -592,7 +592,7 @@
         <div class="page-actions">
           <button class="secondary-button" id="refresh-btn" type="button">Refresh</button>
           <button class="primary-button hidden" id="add-wake-btn" type="button">Add machine</button>
-          <button class="primary-button hidden" id="add-site-btn" type="button">Add site</button>
+          <button class="primary-button hidden" id="add-site-btn" type="button">Add check</button>
         </div>
       </section>
       <div class="notice" id="notice"></div>
@@ -602,7 +602,7 @@
 
   <dialog id="site-dialog">
     <form method="dialog" class="modal-head">
-      <h2 id="site-dialog-title">Add site</h2>
+      <h2 id="site-dialog-title">Add status check</h2>
       <button class="secondary-button" type="submit">Close</button>
     </form>
     <form class="modal-form" id="site-form">
@@ -698,7 +698,7 @@
       wake: ['Wake', 'Wake-on-LAN machines and recent wake requests'],
       homeassistant: ['Home Assistant', 'States, logbook, error log, and API reachability'],
       unifi: ['UniFi', 'Network health, devices, clients, events, and alarms'],
-      sites: ['Sites', 'Configured status checks'],
+      sites: ['Status checks', 'Configured URL monitors'],
       logs: ['Logs', 'Recent NAS, Home Assistant, and UniFi records'],
       settings: ['Settings', 'Integration URLs, keys, disks, and wake defaults'],
     };
@@ -888,7 +888,7 @@
                 ${serviceCard('Wake-on-LAN', true, `${wake.enabled || 0}/${wake.total || 0} enabled`, wake.lastWakeAt ? `Last wake ${formatDate(wake.lastWakeAt)}` : 'No wake requests yet')}
                 ${serviceCard('Home Assistant', !!ha.ok, ha.configured ? ha.baseUrl : ha.error, ha.configured ? `${ha.servicesCount || 0} services - ${ha.eventsCount || 0} event types` : 'Set HOME_ASSISTANT_URL and token')}
                 ${serviceCard('UniFi Network', !!unifi.ok, unifi.configured ? unifi.baseUrl : unifi.error, unifi.configured ? `${unifi.devices?.total || 0} devices - site ${escapeHtml(unifi.site || '')}` : 'Set UniFi credentials')}
-                ${serviceCard('Sites', (sites.down || 0) === 0, `${sites.up || 0}/${sites.total || 0} reachable`, `${sites.down || 0} down - ${sites.disabled || 0} disabled`)}
+                ${serviceCard('Status checks', (sites.down || 0) === 0, `${sites.up || 0}/${sites.total || 0} reachable`, `${sites.down || 0} down - ${sites.disabled || 0} disabled`)}
               </div>
             </section>
             <section class="panel">
@@ -902,10 +902,10 @@
           </div>
           <section class="panel">
             <div class="panel-heading">
-              <div><h2>Sites</h2><p>${sites.up || 0} reachable, ${sites.down || 0} down</p></div>
+              <div><h2>Status checks</h2><p>${sites.up || 0} reachable, ${sites.down || 0} down</p></div>
             </div>
             <div class="resource-grid compact">
-              ${(sites.sites || []).slice(0, 8).map(siteCard).join('') || '<div class="empty-state">No sites configured.</div>'}
+              ${(sites.sites || []).slice(0, 8).map(siteCard).join('') || '<div class="empty-state">No status checks configured.</div>'}
             </div>
           </section>
         </div>
@@ -1222,7 +1222,7 @@
           <section class="panel">
             <div class="panel-heading"><div><h2>Status checks</h2><p>${formatDate(state.data.collectedAt)}</p></div></div>
             <div class="resource-grid">
-              ${(sites.sites || []).map(siteCard).join('') || '<div class="empty-state">No sites configured.</div>'}
+              ${(sites.sites || []).map(siteCard).join('') || '<div class="empty-state">No status checks configured.</div>'}
             </div>
           </section>
         </div>
@@ -1749,7 +1749,7 @@
 
     function openSiteDialog(site = null) {
       state.editingSiteId = site?.id || null;
-      document.getElementById('site-dialog-title').textContent = site ? 'Edit site' : 'Add site';
+      document.getElementById('site-dialog-title').textContent = site ? 'Edit status check' : 'Add status check';
       siteField('name').value = site?.name || '';
       siteField('group').value = site?.group || 'General';
       siteField('url').value = site?.url || '';
