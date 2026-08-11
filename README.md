@@ -37,9 +37,11 @@ Required environment:
 | `UNIFI_SITE_MANAGER_URL` | Optional Site Manager API base override; defaults to `https://api.ui.com` |
 | `UNIFI_LOGIN_PATHS` | Login paths to try, defaults to UniFi OS then classic controller |
 | `UNIFI_API_PREFIXES` | API path prefixes to try, defaults to `/proxy/network` then classic root |
-| `STATUS_SITES` | JSON array used to seed the Status checks page |
+| `STATUS_SITES` | JSON array used to seed additional Status checks |
 
 Home Assistant uses its REST API for states, logbook, events, services, system health, and error log. UniFi uses the local Network application API style because it exposes the broadest status and log surface for a NAS-local dashboard; with a Site Manager API key, the UniFi page also asks the documented Site Manager `/v1/hosts` and `/v1/sites` endpoints so admins can choose between consoles even when every Network site is named `default`. Connected clients are collected from the official Network Integration `/v1/sites/{siteId}/clients` endpoint using the UUID returned by Network Integration `/v1/sites`; legacy endpoints such as `api/s/default/stat/sta` use the site's `internalReference` instead. If UniFi returns summary counts through Site Manager but does not return detailed client rows, ChempBoard shows the Site Manager client count clearly as summary-only data.
+
+The Status checks page automatically includes the Chempner Traefik hostnames from `*.chempner.ch` and merges any missing defaults into `DATA_DIR/sites.json` without replacing existing checks.
 
 Admins can change NAS disk paths/log files, Home Assistant URL/token, UniFi URL/credentials/API key, and WOL defaults from the Settings page. Saved settings live in `DATA_DIR/settings.json` and override environment defaults without rebuilding the container.
 

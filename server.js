@@ -36,6 +36,36 @@ const NAS_PROC_PATH = process.env.NAS_PROC_PATH || (fs.existsSync('/host/proc/up
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
 const HA_LOW_BATTERY = clampInt(process.env.HA_LOW_BATTERY, 20, 1, 90);
 const LOG_LINE_LIMIT = clampInt(process.env.LOG_LINE_LIMIT, 120, 20, 500);
+const CHEMPNER_TRAEFIK_STATUS_SITES = [
+  { name: 'AdGuard', url: 'https://adguard.chempner.ch', group: 'Network', kind: 'dns', tags: ['traefik'] },
+  { name: 'Auth Manager', url: 'https://auth.chempner.ch', group: 'Auth', kind: 'auth', tags: ['traefik'] },
+  { name: 'Authentik', url: 'https://authentik.chempner.ch', group: 'Auth', kind: 'auth', tags: ['traefik'] },
+  { name: 'ChempBoard', url: 'https://board.chempner.ch', group: 'Home', kind: 'dashboard', tags: ['traefik'] },
+  { name: 'Chemption', url: 'https://chemption.chempner.ch', group: 'Apps', kind: 'app', tags: ['traefik'] },
+  { name: 'Cloud', url: 'https://cloud.chempner.ch', group: 'Productivity', kind: 'cloud', tags: ['traefik'] },
+  { name: 'Collabora', url: 'https://collabora.chempner.ch', group: 'Productivity', kind: 'office', tags: ['traefik'] },
+  { name: 'Elvanto', url: 'https://elvanto.chempner.ch', group: 'Community', kind: 'app', tags: ['traefik'] },
+  { name: 'Frankly', url: 'https://frankly.chempner.ch', group: 'Apps', kind: 'app', tags: ['traefik'] },
+  { name: 'Headplane', url: 'https://headplane.chempner.ch', group: 'Network', kind: 'vpn', tags: ['traefik'] },
+  { name: 'Headscale', url: 'https://headscale.chempner.ch', group: 'Network', kind: 'vpn', tags: ['traefik'] },
+  { name: 'Immich', url: 'https://immich.chempner.ch', group: 'Media', kind: 'photos', tags: ['traefik'] },
+  { name: 'Jellyfin', url: 'https://jellyfin.chempner.ch', group: 'Media', kind: 'streaming', tags: ['traefik'] },
+  { name: 'Leaders', url: 'https://leaders.chempner.ch', group: 'Community', kind: 'app', tags: ['traefik'] },
+  { name: 'NAS', url: 'https://nas.chempner.ch', group: 'Home', kind: 'nas', tags: ['traefik'] },
+  { name: 'OnlyOffice', url: 'https://onlyoffice.chempner.ch', group: 'Productivity', kind: 'office', tags: ['traefik'] },
+  { name: 'PDF', url: 'https://pdf.chempner.ch', group: 'Productivity', kind: 'documents', tags: ['traefik'] },
+  { name: 'Pulse', url: 'https://pulse.chempner.ch', group: 'Monitoring', kind: 'status', tags: ['traefik'] },
+  { name: 'Radarr', url: 'https://radarr.chempner.ch', group: 'Media', kind: 'arr', tags: ['traefik'] },
+  { name: 'Scrutiny', url: 'https://scrutiny.chempner.ch', group: 'Monitoring', kind: 'disks', tags: ['traefik'] },
+  { name: 'Seerr', url: 'https://seerr.chempner.ch', group: 'Media', kind: 'requests', tags: ['traefik'] },
+  { name: 'Sonarr', url: 'https://sonarr.chempner.ch', group: 'Media', kind: 'arr', tags: ['traefik'] },
+  { name: 'Strommap', url: 'https://strommap.chempner.ch', group: 'Apps', kind: 'map', tags: ['traefik'] },
+  { name: 'Subscribe Calendar', url: 'https://subscribe-calendar.chempner.ch', group: 'Productivity', kind: 'calendar', tags: ['traefik'] },
+  { name: 'Traefik', url: 'https://traefik.chempner.ch', group: 'Network', kind: 'proxy', tags: ['traefik'] },
+  { name: 'Vigil', url: 'https://vigil.chempner.ch', group: 'Monitoring', kind: 'status', tags: ['traefik'] },
+  { name: 'Work', url: 'https://work.chempner.ch', group: 'Productivity', kind: 'app', tags: ['traefik'] },
+  { name: 'Youth Timeline', url: 'https://youthtimeline.chempner.ch', group: 'Community', kind: 'timeline', tags: ['traefik'] },
+];
 
 if (!AUTH_DISABLED && !JWT_SECRET) {
   console.warn('[auth] WARNING: JWT_SECRET is not set. Shared auth will reject all tokens.');
@@ -857,6 +887,8 @@ function parseSitesSeed() {
     }
   }
 
+  seeded.push(...CHEMPNER_TRAEFIK_STATUS_SITES);
+
   const nasPublicUrl = stringSetting('nasPublicUrl', 'NAS_PUBLIC_URL', '', 600);
   const homeAssistantUrl = stringSetting('homeAssistantUrl', 'HOME_ASSISTANT_URL', '', 600);
   const unifiUrl = stringSetting('unifiUrl', 'UNIFI_URL', '', 600);
@@ -884,6 +916,34 @@ function parseSitesSeed() {
       }
     })
     .filter(Boolean);
+}
+
+function siteUrlKey(site) {
+  try {
+    return cleanBaseUrl(normalizeUrl(site.url)).toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function mergeSeedSites(sites) {
+  const next = [...sites];
+  const ids = new Set(next.map(site => String(site.id || '').toLowerCase()).filter(Boolean));
+  const urls = new Set(next.map(siteUrlKey).filter(Boolean));
+  let changed = false;
+
+  for (const seed of parseSitesSeed()) {
+    const id = String(seed.id || '').toLowerCase();
+    const url = siteUrlKey(seed);
+    if ((id && ids.has(id)) || (url && urls.has(url))) continue;
+    seed.id = uniqueSiteId(next, seed.id || seed.name);
+    next.push(seed);
+    ids.add(String(seed.id || '').toLowerCase());
+    if (url) urls.add(url);
+    changed = true;
+  }
+
+  return { sites: next, changed };
 }
 
 function normalizeTags(value) {
@@ -953,7 +1013,7 @@ function loadSites() {
   const parsed = JSON.parse(fs.readFileSync(SITES_FILE, 'utf8') || '[]');
   const rows = Array.isArray(parsed) ? parsed : parsed.sites;
   if (!Array.isArray(rows)) return [];
-  return rows
+  const sites = rows
     .map(site => {
       try {
         return normalizeSite(site, {}, { touch: false });
@@ -963,6 +1023,9 @@ function loadSites() {
       }
     })
     .filter(Boolean);
+  const merged = mergeSeedSites(sites);
+  if (merged.changed) writeSites(merged.sites);
+  return merged.sites;
 }
 
 function writeSites(sites) {

@@ -408,6 +408,31 @@
       display: grid;
       gap: 0.6rem;
     }
+    .chart-list {
+      display: grid;
+      gap: 0.72rem;
+    }
+    .chart-row {
+      display: grid;
+      grid-template-columns: minmax(7rem, 0.32fr) minmax(0, 1fr) auto;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    .chart-row strong,
+    .chart-row span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .chart-row strong {
+      color: #dbeafe;
+      font-size: 0.86rem;
+    }
+    .chart-row span {
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 800;
+      text-align: right;
+    }
     .metric-row {
       display: grid;
       grid-template-columns: minmax(7rem, 0.35fr) minmax(0, 1fr);
@@ -437,6 +462,10 @@
     }
     .bar.warn > span { background: var(--amber); }
     .bar.danger > span { background: var(--red); }
+    .bar.blue > span { background: #60a5fa; }
+    .bar.green > span { background: var(--green); }
+    .bar.amber > span { background: var(--amber); }
+    .bar.red > span { background: var(--red); }
     .log-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
@@ -878,6 +907,10 @@
             ${statCard('Home Assistant', ha.configured ? String(ha.states?.total || 0) : 'Off', ha.configured ? `${ha.states?.problems?.length || 0} problem states` : ha.error || 'Not configured', ha.ok ? 'green' : 'amber')}
             ${statCard('UniFi clients', unifi.configured ? String(unifi.clients?.total || 0) : 'Off', unifi.configured ? `${unifi.devices?.offline || 0} offline devices` : unifi.error || 'Not configured', unifi.ok ? 'blue' : 'amber')}
           </div>
+          <div class="split-layout">
+            ${chartPanel('Status overview', `${sites.total || 0} configured checks`, statusGraphRows(sites.sites || []), 'No status check data.')}
+            ${chartPanel('NAS resources', nas.procPath || 'Local host snapshot', nasResourceRows(nas), 'No NAS resource data.')}
+          </div>
           <div class="dashboard-layout">
             <section class="panel">
               <div class="panel-heading">
@@ -922,6 +955,10 @@
             ${statCard('Disabled', String(wake.disabled || 0), 'Skipped for wake requests', wake.disabled ? 'amber' : 'green')}
             ${statCard('Last wake', wake.lastWakeAt ? formatDate(wake.lastWakeAt) : '-', 'Most recent request', wake.lastWakeAt ? 'green' : 'blue')}
             ${statCard('Log entries', String((wake.log || []).length), 'Stored recent wake requests', 'blue')}
+          </div>
+          <div class="split-layout">
+            ${chartPanel('Wake coverage', `${wake.total || 0} machines`, wakeGraphRows(wake), 'No wake graph data.')}
+            ${chartPanel('Wake targets', 'Configured machine ports', countRows(devices, device => `${device.port || 9}/udp`), 'No wake targets.')}
           </div>
           <section class="panel">
             <div class="panel-heading">
@@ -971,6 +1008,10 @@
             ${statCard('Containers', `${nas.docker?.running || 0}/${nas.docker?.total || 0}`, nas.docker?.configured ? 'Docker socket connected' : 'Docker socket not mounted', nas.docker?.configured ? 'green' : 'amber')}
           </div>
           <div class="split-layout">
+            ${chartPanel('Resource usage', nas.cpu?.model || 'Current snapshot', nasResourceRows(nas), 'No resource usage data.')}
+            ${chartPanel('Disk usage', `${(nas.disks || []).length} paths checked`, diskGraphRows(nas.disks || []), 'No disk usage data.')}
+          </div>
+          <div class="split-layout">
             <section class="panel">
               <div class="panel-heading"><div><h2>Disks</h2><p>${(nas.disks || []).length} paths checked</p></div></div>
               <div class="resource-grid compact">
@@ -1007,6 +1048,10 @@
             ${statCard('Problem states', String(ha.states?.problems?.length || 0), `${ha.states?.unavailable || 0} unavailable or unknown`, (ha.states?.problems?.length || 0) ? 'amber' : 'green')}
             ${statCard('Services', String(ha.servicesCount || 0), `${ha.eventsCount || 0} event types`, 'blue')}
             ${statCard('Version', ha.config?.version || '-', ha.config?.location_name || ha.config?.time_zone || '-', ha.ok ? 'green' : 'red')}
+          </div>
+          <div class="split-layout">
+            ${chartPanel('API health', ha.baseUrl || '', endpointGraphRows(ha.endpoints || []), 'No endpoint checks.')}
+            ${chartPanel('Problem mix', `${ha.states?.problems?.length || 0} problem states`, countRows(ha.states?.problems || [], item => item.reason || item.state), 'No problem states.')}
           </div>
           <div class="split-layout">
             <section class="panel">
@@ -1122,6 +1167,90 @@
       return (rows || []).slice(0, 2).map(item => `${item.name}: ${item.count}`).join(' - ');
     }
 
+    function valueCountText(value, unit = '') {
+      const number = Number(value || 0);
+      return `${number}${unit ? ' ' + unit : ''}`;
+    }
+
+    function chartPanel(title, subtitle, rows, emptyText) {
+      const chartRows = (rows || [])
+        .map(row => ({
+          label: String(row.label || row.name || '').trim(),
+          value: Number(row.value ?? row.count ?? 0),
+          detail: row.detail || row.valueLabel || '',
+          tone: row.tone || '',
+          showZero: !!row.showZero,
+        }))
+        .filter(row => row.label && (row.value > 0 || row.showZero))
+        .slice(0, 12);
+      const max = Math.max(1, ...chartRows.map(row => row.value));
+      return `<section class="panel">
+        <div class="panel-heading"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle || '')}</p></div></div>
+        <div class="chart-list">
+          ${chartRows.map(row => {
+            const width = Math.max(2, Math.round((row.value / max) * 100));
+            return `<div class="chart-row"><strong>${escapeHtml(row.label)}</strong><div class="bar ${escapeHtml(row.tone)}" style="--value:${width}%"><span></span></div><span>${escapeHtml(row.detail || valueCountText(row.value))}</span></div>`;
+          }).join('') || `<div class="empty-state">${escapeHtml(emptyText || 'No graph data.')}</div>`}
+        </div>
+      </section>`;
+    }
+
+    function countRows(items, selector, fallback = 'Unknown') {
+      const counts = new Map();
+      for (const item of items || []) {
+        const key = String(selector(item) || fallback).trim() || fallback;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      return [...counts.entries()]
+        .map(([label, value]) => ({ label, value, detail: valueCountText(value) }))
+        .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+    }
+
+    function statusGraphRows(sites = []) {
+      return [
+        { label: 'Reachable', value: sites.filter(site => site.state === 'up' || site.state === 'protected').length, tone: 'green' },
+        { label: 'Down', value: sites.filter(site => site.state === 'down').length, tone: 'red', showZero: true },
+        { label: 'Disabled', value: sites.filter(site => site.state === 'disabled').length, tone: 'amber', showZero: true },
+      ].map(row => ({ ...row, detail: valueCountText(row.value) }));
+    }
+
+    function nasResourceRows(nas = {}) {
+      const cores = Number(nas.cpu?.cores || 1) || 1;
+      const loadPercent = Number(nas.load?.one) ? Math.min(100, Math.round((Number(nas.load.one) / cores) * 100)) : 0;
+      return [
+        { label: 'Memory used', value: Number(nas.memory?.usedPercent || 0), detail: percentText(nas.memory?.usedPercent), tone: memoryTone(nas.memory?.usedPercent), showZero: true },
+        { label: 'Load 1m', value: loadPercent, detail: nas.load?.one !== undefined ? `${nas.load.one} / ${cores} cores` : '-', tone: loadPercent >= 90 ? 'red' : loadPercent >= 70 ? 'amber' : 'blue', showZero: true },
+        { label: 'Containers running', value: Number(nas.docker?.running || 0), detail: `${nas.docker?.running || 0}/${nas.docker?.total || 0}`, tone: 'green', showZero: true },
+      ];
+    }
+
+    function diskGraphRows(disks = []) {
+      return (disks || []).map(disk => ({
+        label: disk.mount || disk.path,
+        value: Number(disk.usedPercent || 0),
+        detail: percentText(disk.usedPercent),
+        tone: disk.usedPercent >= 90 ? 'red' : disk.usedPercent >= 75 ? 'amber' : 'green',
+        showZero: true,
+      }));
+    }
+
+    function wakeGraphRows(wake = {}) {
+      const log = wake.log || [];
+      return [
+        { label: 'Enabled', value: Number(wake.enabled || 0), tone: 'green', showZero: true },
+        { label: 'Disabled', value: Number(wake.disabled || 0), tone: 'amber', showZero: true },
+        { label: 'Wake sent', value: log.filter(entry => entry.ok).length, tone: 'blue', showZero: true },
+        { label: 'Wake failed', value: log.filter(entry => !entry.ok).length, tone: 'red', showZero: true },
+      ].map(row => ({ ...row, detail: valueCountText(row.value) }));
+    }
+
+    function endpointGraphRows(endpoints = []) {
+      return [
+        { label: 'OK', value: endpoints.filter(endpoint => endpoint.ok).length, tone: 'green', showZero: true },
+        { label: 'Failed', value: endpoints.filter(endpoint => !endpoint.ok).length, tone: 'red', showZero: true },
+      ].map(row => ({ ...row, detail: valueCountText(row.value) }));
+    }
+
     function formatTrafficPair(traffic = {}) {
       const rx = Number(traffic.rxBytes || 0);
       const tx = Number(traffic.txBytes || 0);
@@ -1130,12 +1259,12 @@
     }
 
     function countPanel(title, subtitle, rows, emptyText) {
-      return `<section class="panel">
-        <div class="panel-heading"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(subtitle || '')}</p></div></div>
-        <div class="table">
-          ${(rows || []).map(item => tableRow(item.name, `${item.count} ${item.count === 1 ? 'item' : 'items'}`, '')).join('') || `<div class="empty-state">${escapeHtml(emptyText || 'No data.')}</div>`}
-        </div>
-      </section>`;
+      return chartPanel(title, subtitle, (rows || []).map(item => ({
+        label: item.name,
+        value: item.count,
+        detail: `${item.count} ${item.count === 1 ? 'item' : 'items'}`,
+        tone: 'blue',
+      })), emptyText || 'No data.');
     }
 
     function unifiSiteKey(name, hostId, siteId) {
@@ -1218,6 +1347,10 @@
             ${statCard('Reachable', String(sites.up || 0), 'Up or protected', 'green')}
             ${statCard('Down', String(sites.down || 0), 'Needs attention', sites.down ? 'red' : 'blue')}
             ${statCard('Disabled', String(sites.disabled || 0), 'Skipped checks', 'amber')}
+          </div>
+          <div class="split-layout">
+            ${chartPanel('Reachability', `${sites.total || 0} checks`, statusGraphRows(sites.sites || []), 'No status check data.')}
+            ${chartPanel('Groups', 'Checks by group', countRows(sites.sites || [], site => site.group || 'General'), 'No groups yet.')}
           </div>
           <section class="panel">
             <div class="panel-heading"><div><h2>Status checks</h2><p>${formatDate(state.data.collectedAt)}</p></div></div>
