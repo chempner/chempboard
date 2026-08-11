@@ -31,11 +31,14 @@ const WOL_DEVICES_FILE = process.env.WOL_DEVICES_FILE || path.join(DATA_DIR, 'wo
 const WAKE_LOG_FILE = process.env.WAKE_LOG_FILE || path.join(DATA_DIR, 'wake-log.json');
 const API_TIMEOUT_MS = clampInt(process.env.API_TIMEOUT_MS, 6500, 1000, 60000);
 const SITE_TIMEOUT_MS = clampInt(process.env.SITE_TIMEOUT_MS, 4500, 1000, 60000);
+const SITE_STATUS_CACHE_MS = clampInt(process.env.SITE_STATUS_CACHE_MS, 60000, 5000, 600000);
 const SITE_CHECK_INSECURE = parseBool(process.env.SITE_CHECK_INSECURE);
 const NAS_PROC_PATH = process.env.NAS_PROC_PATH || (fs.existsSync('/host/proc/uptime') ? '/host/proc' : '/proc');
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
 const HA_LOW_BATTERY = clampInt(process.env.HA_LOW_BATTERY, 20, 1, 90);
 const LOG_LINE_LIMIT = clampInt(process.env.LOG_LINE_LIMIT, 120, 20, 500);
+let siteStatusCache = null;
+let siteStatusRefreshPromise = null;
 const CHEMPNER_TRAEFIK_STATUS_SITES = [
   { name: 'AdGuard', url: 'https://adguard.chempner.ch', group: 'Network', kind: 'dns', tags: ['traefik'] },
   { name: 'Auth Manager', url: 'https://auth.chempner.ch', group: 'Auth', kind: 'auth', tags: ['traefik'] },
@@ -96,7 +99,11 @@ function parsePort(value, fallback) {
 function parseWakeTarget(value) {
   const first = String(value || '').split(/[\n,]/)[0].trim();
   const match = /^([0-9]{1,3}(?:\.[0-9]{1,3}){3})(?::(\d{1,5}))?$/.exec(first);
-  if (!match) return { host: first, port: null };
+  if (!match) {
+    const hostPort = /^([^:/\s]+):(\d{1,5})$/.exec(first);
+    if (hostPort) return { host: hostPort[1], port: parsePort(hostPort[2], null) };
+    return { host: first, port: null };
+  }
   return {
     host: match[1],
     port: match[2] === undefined ? null : parsePort(match[2], null),
@@ -540,6 +547,11 @@ function normalizeDevice(raw = {}, existing = {}, options = {}) {
   const parsedTarget = parseWakeTarget(raw.broadcast ?? existing.broadcast ?? defaultBroadcast);
   const rawPort = raw.port ?? existing.port;
   const portValue = rawPort === undefined || rawPort === null || rawPort === '' ? (parsedTarget.port ?? undefined) : rawPort;
+  const parsedCheckTarget = parseWakeTarget(raw.checkHost ?? existing.checkHost ?? '');
+  const rawCheckPort = raw.checkPort ?? existing.checkPort;
+  const checkPortValue = rawCheckPort === undefined || rawCheckPort === null || rawCheckPort === '' ? (parsedCheckTarget.port ?? undefined) : rawCheckPort;
+  const checkPort = checkPortValue === undefined || checkPortValue === null || checkPortValue === '' ? null : parsePort(checkPortValue, null);
+  const checkHost = asText(parsedCheckTarget.host || (checkPort && isUnicastTarget(parsedTarget.host) ? parsedTarget.host : ''), 120);
   const mac = normalizeMac(raw.mac ?? existing.mac);
   if (!mac) throw new Error('A valid MAC address is required');
 
@@ -553,6 +565,8 @@ function normalizeDevice(raw = {}, existing = {}, options = {}) {
     mac,
     broadcast: asText(parsedTarget.host, 120) || defaultBroadcast,
     port: parsePort(portValue, defaultPort),
+    checkHost,
+    checkPort,
     description: asText(raw.description ?? existing.description, 280),
     tags: normalizeTags(raw.tags ?? existing.tags),
     enabled: raw.enabled === undefined ? existing.enabled !== false : !!raw.enabled,
@@ -618,6 +632,8 @@ function publicWakeDevice(device) {
     mac: device.mac,
     broadcast: device.broadcast,
     port: device.port,
+    checkHost: device.checkHost,
+    checkPort: device.checkPort,
     targets,
     wakeTargets,
     check: wakeCheckTargetForDevice(device),
@@ -675,6 +691,12 @@ function isUnicastTarget(target) {
   return true;
 }
 
+function isAwakeCheckHost(target) {
+  const text = String(target || '').trim();
+  if (!text || text === '0.0.0.0' || isBroadcastTarget(text)) return false;
+  return true;
+}
+
 function wakeTargetsForDevice(device) {
   const extraTargets = parseList(stringSetting('wolExtraBroadcasts', 'WOL_EXTRA_BROADCASTS', '', 1200).replace(/\n/g, ','))
     .map(target => parseWakeTarget(target).host);
@@ -712,11 +734,13 @@ function wakeTargetsForDevice(device) {
 }
 
 function wakeCheckTargetForDevice(device) {
-  if (!isUnicastTarget(device.broadcast)) return null;
+  const checkPort = parsePort(device.checkPort, null);
+  const checkHost = parseWakeTarget(device.checkHost || device.broadcast).host;
+  if (!checkPort || !isAwakeCheckHost(checkHost)) return null;
   return {
-    host: device.broadcast,
-    port: device.port,
-    label: `TCP ${device.port}`,
+    host: checkHost,
+    port: checkPort,
+    label: `TCP ${checkPort}`,
   };
 }
 
@@ -926,15 +950,32 @@ function siteUrlKey(site) {
   }
 }
 
+function deletedSiteSeedKeys() {
+  const settings = loadSettings();
+  const rows = Array.isArray(settings.deletedSiteSeedKeys) ? settings.deletedSiteSeedKeys : [];
+  return new Set(rows.map(value => asText(value, 600).toLowerCase()).filter(Boolean));
+}
+
+function rememberDeletedSiteSeed(site) {
+  const key = siteUrlKey(site) || String(site?.id || '').toLowerCase();
+  if (!key) return;
+  const settings = loadSettings();
+  const rows = Array.isArray(settings.deletedSiteSeedKeys) ? settings.deletedSiteSeedKeys : [];
+  const next = [...new Set([...rows, key].map(value => asText(value, 600).toLowerCase()).filter(Boolean))];
+  writeSettings({ ...settings, deletedSiteSeedKeys: next, updatedAt: new Date().toISOString() });
+}
+
 function mergeSeedSites(sites) {
   const next = [...sites];
   const ids = new Set(next.map(site => String(site.id || '').toLowerCase()).filter(Boolean));
   const urls = new Set(next.map(siteUrlKey).filter(Boolean));
+  const deleted = deletedSiteSeedKeys();
   let changed = false;
 
   for (const seed of parseSitesSeed()) {
     const id = String(seed.id || '').toLowerCase();
     const url = siteUrlKey(seed);
+    if ((id && deleted.has(id)) || (url && deleted.has(url))) continue;
     if ((id && ids.has(id)) || (url && urls.has(url))) continue;
     seed.id = uniqueSiteId(next, seed.id || seed.name);
     next.push(seed);
@@ -1005,9 +1046,9 @@ function publicSite(site) {
 
 function loadSites() {
   if (!fs.existsSync(SITES_FILE)) {
-    const seeded = parseSitesSeed();
-    writeSites(seeded);
-    return seeded;
+    const merged = mergeSeedSites([]);
+    writeSites(merged.sites);
+    return merged.sites;
   }
 
   const parsed = JSON.parse(fs.readFileSync(SITES_FILE, 'utf8') || '[]');
@@ -1092,16 +1133,85 @@ async function checkSite(site) {
   }
 }
 
-async function checkAllSites() {
-  const sites = loadSites();
-  const results = await Promise.all(sites.map(site => checkSite(site)));
+function siteStatusFingerprint(sites) {
+  return JSON.stringify((sites || []).map(site => ({
+    id: site.id,
+    url: site.url,
+    method: site.method,
+    timeoutMs: site.timeoutMs,
+    enabled: site.enabled,
+  })));
+}
+
+function summarizeSiteResults(results, extra = {}) {
   return {
     total: results.length,
     up: results.filter(site => site.state === 'up' || site.state === 'protected').length,
     down: results.filter(site => site.state === 'down').length,
     disabled: results.filter(site => site.state === 'disabled').length,
+    checking: results.filter(site => site.state === 'checking').length,
     sites: results,
+    ...extra,
   };
+}
+
+function pendingSiteResults(sites) {
+  const checkedAt = new Date().toISOString();
+  return sites.map(site => ({
+    ...publicSite(site),
+    state: site.enabled ? 'checking' : 'disabled',
+    ok: false,
+    checkedAt,
+    latencyMs: null,
+    httpStatus: null,
+    error: '',
+  }));
+}
+
+async function runSiteChecks(sites, fingerprint) {
+  const results = await Promise.all(sites.map(site => checkSite(site)));
+  siteStatusCache = {
+    fingerprint,
+    checkedAt: new Date().toISOString(),
+    summary: summarizeSiteResults(results, { checking: 0, refreshing: false }),
+  };
+  return siteStatusCache.summary;
+}
+
+function refreshSiteChecksInBackground(sites, fingerprint) {
+  if (siteStatusRefreshPromise) return siteStatusRefreshPromise;
+  siteStatusRefreshPromise = runSiteChecks(sites, fingerprint)
+    .catch(err => {
+      console.warn(`[sites] Background status refresh failed: ${err.message}`);
+      return null;
+    })
+    .finally(() => {
+      siteStatusRefreshPromise = null;
+    });
+  return siteStatusRefreshPromise;
+}
+
+function invalidateSiteStatusCache() {
+  siteStatusCache = null;
+}
+
+async function checkAllSites(options = {}) {
+  const sites = loadSites();
+  const fingerprint = siteStatusFingerprint(sites);
+  if (options.wait) return runSiteChecks(sites, fingerprint);
+
+  const now = Date.now();
+  const cacheTime = siteStatusCache?.checkedAt ? Date.parse(siteStatusCache.checkedAt) : 0;
+  const cacheMatches = siteStatusCache?.fingerprint === fingerprint;
+  if (cacheMatches && siteStatusCache?.summary) {
+    if (!siteStatusRefreshPromise && now - cacheTime > SITE_STATUS_CACHE_MS) {
+      refreshSiteChecksInBackground(sites, fingerprint);
+    }
+    return { ...siteStatusCache.summary, refreshing: !!siteStatusRefreshPromise };
+  }
+
+  refreshSiteChecksInBackground(sites, fingerprint);
+  return summarizeSiteResults(pendingSiteResults(sites), { refreshing: true });
 }
 
 function readFileSafe(filePath) {
@@ -2678,8 +2788,8 @@ app.get('/api/sites', requireAuth, (_req, res) => {
   res.json({ sites: loadSites().map(publicSite) });
 });
 
-app.get('/api/sites/status', requireAuth, async (_req, res) => {
-  res.json(await checkAllSites());
+app.get('/api/sites/status', requireAuth, async (req, res) => {
+  res.json(await checkAllSites({ wait: req.query.wait === '1' }));
 });
 
 app.get('/api/wol/devices', requireAuth, (_req, res) => {
@@ -2774,6 +2884,7 @@ app.post('/api/sites', requireAuth, requireAdmin, (req, res) => {
     site.id = uniqueSiteId(sites, req.body?.id || site.name);
     sites.push(site);
     writeSites(sites);
+    invalidateSiteStatusCache();
     res.status(201).json({ site: publicSite(site) });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Could not create site' });
@@ -2788,6 +2899,7 @@ app.put('/api/sites/:id', requireAuth, requireAdmin, (req, res) => {
     const site = normalizeSite({ ...sites[index], ...req.body, id: sites[index].id }, sites[index]);
     sites[index] = site;
     writeSites(sites);
+    invalidateSiteStatusCache();
     return res.json({ site: publicSite(site) });
   } catch (err) {
     return res.status(400).json({ error: err.message || 'Could not update site' });
@@ -2796,9 +2908,12 @@ app.put('/api/sites/:id', requireAuth, requireAdmin, (req, res) => {
 
 app.delete('/api/sites/:id', requireAuth, requireAdmin, (req, res) => {
   const sites = loadSites();
+  const removedSite = sites.find(site => site.id === req.params.id);
   const nextSites = sites.filter(site => site.id !== req.params.id);
   if (nextSites.length === sites.length) return res.status(404).json({ error: 'Site not found' });
+  rememberDeletedSiteSeed(removedSite);
   writeSites(nextSites);
+  invalidateSiteStatusCache();
   return res.json({ ok: true });
 });
 

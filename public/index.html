@@ -700,6 +700,14 @@
         <span>Port</span>
         <input id="wake-port" name="port" type="number" min="0" max="65535" required />
       </label>
+      <label>
+        <span>Awake check host</span>
+        <input id="wake-check-host" name="checkHost" placeholder="10.13.37.33" autocomplete="off" />
+      </label>
+      <label>
+        <span>Awake check port</span>
+        <input id="wake-check-port" name="checkPort" type="number" min="1" max="65535" placeholder="22" />
+      </label>
       <label class="full">
         <span>Tags</span>
         <input id="wake-tags" name="tags" placeholder="office, nas, family" autocomplete="off" />
@@ -718,6 +726,20 @@
         <button class="primary-button" id="wake-save-btn" type="submit">Save</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="confirm-dialog">
+    <div class="modal-head">
+      <h2 id="confirm-title">Confirm action</h2>
+      <button class="secondary-button" id="confirm-close-btn" type="button">Close</button>
+    </div>
+    <div class="modal-form">
+      <p class="full" id="confirm-message">Are you sure?</p>
+      <div class="modal-actions">
+        <button class="secondary-button" id="confirm-cancel-btn" type="button">Cancel</button>
+        <button class="danger-button" id="confirm-action-btn" type="button">Delete</button>
+      </div>
+    </div>
   </dialog>
 
   <script>
@@ -742,6 +764,7 @@
       editingSiteId: null,
       editingWakeDeviceId: null,
       wakeMessages: new Map(),
+      statusRefreshTimer: null,
     };
 
     const content = document.getElementById('content');
@@ -754,6 +777,12 @@
     const wakeDialog = document.getElementById('wake-dialog');
     const wakeForm = document.getElementById('wake-form');
     const wakeStatus = document.getElementById('wake-form-status');
+    const confirmDialog = document.getElementById('confirm-dialog');
+    const confirmTitle = document.getElementById('confirm-title');
+    const confirmMessage = document.getElementById('confirm-message');
+    const confirmCloseBtn = document.getElementById('confirm-close-btn');
+    const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
+    const confirmActionBtn = document.getElementById('confirm-action-btn');
 
     document.querySelectorAll('[data-route]').forEach(button => {
       button.addEventListener('click', () => navigate(button.dataset.route));
@@ -889,6 +918,19 @@
         content.innerHTML = renderSettings();
         bindSettingsForm();
       }
+      scheduleStatusRefreshPoll();
+    }
+
+    function scheduleStatusRefreshPoll() {
+      if (state.statusRefreshTimer) {
+        clearTimeout(state.statusRefreshTimer);
+        state.statusRefreshTimer = null;
+      }
+      if (!state.data?.sites?.refreshing) return;
+      state.statusRefreshTimer = setTimeout(() => {
+        state.statusRefreshTimer = null;
+        if (!document.hidden) refreshDashboard({ quiet: true });
+      }, 2500);
     }
 
     function renderOverview() {
@@ -921,7 +963,7 @@
                 ${serviceCard('Wake-on-LAN', true, `${wake.enabled || 0}/${wake.total || 0} enabled`, wake.lastWakeAt ? `Last wake ${formatDate(wake.lastWakeAt)}` : 'No wake requests yet')}
                 ${serviceCard('Home Assistant', !!ha.ok, ha.configured ? ha.baseUrl : ha.error, ha.configured ? `${ha.servicesCount || 0} services - ${ha.eventsCount || 0} event types` : 'Set HOME_ASSISTANT_URL and token')}
                 ${serviceCard('UniFi Network', !!unifi.ok, unifi.configured ? unifi.baseUrl : unifi.error, unifi.configured ? `${unifi.devices?.total || 0} devices - site ${escapeHtml(unifi.site || '')}` : 'Set UniFi credentials')}
-                ${serviceCard('Status checks', (sites.down || 0) === 0, `${sites.up || 0}/${sites.total || 0} reachable`, `${sites.down || 0} down - ${sites.disabled || 0} disabled`)}
+                ${serviceCard('Status checks', (sites.down || 0) === 0, `${sites.up || 0}/${sites.total || 0} reachable`, siteStatusMeta(sites))}
               </div>
             </section>
             <section class="panel">
@@ -935,7 +977,7 @@
           </div>
           <section class="panel">
             <div class="panel-heading">
-              <div><h2>Status checks</h2><p>${sites.up || 0} reachable, ${sites.down || 0} down</p></div>
+              <div><h2>Status checks</h2><p>${sites.up || 0} reachable, ${sites.down || 0} down${sites.refreshing ? ' - refreshing' : ''}</p></div>
             </div>
             <div class="resource-grid compact">
               ${(sites.sites || []).slice(0, 8).map(siteCard).join('') || '<div class="empty-state">No status checks configured.</div>'}
@@ -1210,8 +1252,16 @@
       return [
         { label: 'Reachable', value: sites.filter(site => site.state === 'up' || site.state === 'protected').length, tone: 'green' },
         { label: 'Down', value: sites.filter(site => site.state === 'down').length, tone: 'red', showZero: true },
+        { label: 'Checking', value: sites.filter(site => site.state === 'checking').length, tone: 'blue', showZero: false },
         { label: 'Disabled', value: sites.filter(site => site.state === 'disabled').length, tone: 'amber', showZero: true },
       ].map(row => ({ ...row, detail: valueCountText(row.value) }));
+    }
+
+    function siteStatusMeta(sites = {}) {
+      const parts = [`${sites.down || 0} down`, `${sites.disabled || 0} disabled`];
+      if (sites.checking) parts.push(`${sites.checking} checking`);
+      if (sites.refreshing) parts.push('refreshing in background');
+      return parts.join(' - ');
     }
 
     function nasResourceRows(nas = {}) {
@@ -1346,6 +1396,7 @@
             ${statCard('Total', String(sites.total || 0), 'Configured checks', 'cyan')}
             ${statCard('Reachable', String(sites.up || 0), 'Up or protected', 'green')}
             ${statCard('Down', String(sites.down || 0), 'Needs attention', sites.down ? 'red' : 'blue')}
+            ${statCard('Checking', String(sites.checking || 0), sites.refreshing ? 'Refreshing in background' : 'Background cache', sites.checking ? 'blue' : 'green')}
             ${statCard('Disabled', String(sites.disabled || 0), 'Skipped checks', 'amber')}
           </div>
           <div class="split-layout">
@@ -1508,7 +1559,7 @@
     }
 
     function siteCard(site) {
-      const stateClass = site.state === 'up' || site.state === 'protected' ? 'up' : site.state === 'disabled' ? 'warn' : 'down';
+      const stateClass = site.state === 'up' || site.state === 'protected' ? 'up' : site.state === 'disabled' || site.state === 'checking' ? 'warn' : 'down';
       const actions = state.user?.is_admin
         ? `<div class="chip-row"><button class="secondary-button" data-edit-site="${escapeHtml(site.id)}" type="button">Edit</button><button class="danger-button" data-delete-site="${escapeHtml(site.id)}" type="button">Delete</button></div>`
         : '';
@@ -1600,7 +1651,7 @@
     }
 
     function wakeStatusText(status = {}, check = {}) {
-      if (!status.configured && !check.host) return '<span class="muted">No TCP check</span>';
+      if (!status.configured && !check.host) return '<span class="muted">No awake check</span>';
       const open = status.open === true;
       const closed = status.open === false;
       const tone = open ? 'up' : closed ? 'down' : 'warn';
@@ -1813,6 +1864,8 @@
       wakeField('mac').value = device?.mac || '';
       wakeField('broadcast').value = device?.broadcast || state.settings?.wolDefaultBroadcast || '255.255.255.255';
       wakeField('port').value = device?.port || state.settings?.wolDefaultPort || 9;
+      wakeField('checkHost').value = device?.checkHost || '';
+      wakeField('checkPort').value = device?.checkPort || '';
       wakeField('tags').value = (device?.tags || []).join(', ');
       wakeField('description').value = device?.description || '';
       wakeField('enabled').checked = device?.enabled !== false;
@@ -1823,6 +1876,38 @@
 
     function wakeField(name) {
       return wakeForm.elements.namedItem(name);
+    }
+
+    function confirmAction({ title, message, action = 'Delete' }) {
+      confirmTitle.textContent = title || 'Confirm action';
+      confirmMessage.textContent = message || 'Are you sure?';
+      confirmActionBtn.textContent = action;
+
+      return new Promise(resolve => {
+        let settled = false;
+        function finish(result) {
+          if (settled) return;
+          settled = true;
+          confirmCloseBtn.removeEventListener('click', onCancel);
+          confirmCancelBtn.removeEventListener('click', onCancel);
+          confirmActionBtn.removeEventListener('click', onConfirm);
+          confirmDialog.removeEventListener('cancel', onDialogCancel);
+          if (confirmDialog.open) confirmDialog.close();
+          resolve(result);
+        }
+        function onCancel() { finish(false); }
+        function onConfirm() { finish(true); }
+        function onDialogCancel(event) {
+          event.preventDefault();
+          finish(false);
+        }
+
+        confirmCloseBtn.addEventListener('click', onCancel);
+        confirmCancelBtn.addEventListener('click', onCancel);
+        confirmActionBtn.addEventListener('click', onConfirm);
+        confirmDialog.addEventListener('cancel', onDialogCancel);
+        confirmDialog.showModal();
+      });
     }
 
     async function saveWakeDevice(event) {
@@ -1837,6 +1922,8 @@
           mac: wakeField('mac').value,
           broadcast: wakeField('broadcast').value,
           port: Number(wakeField('port').value || 9),
+          checkHost: wakeField('checkHost').value,
+          checkPort: wakeField('checkPort').value,
           tags: wakeField('tags').value,
           description: wakeField('description').value,
           enabled: wakeField('enabled').checked,
@@ -1874,7 +1961,13 @@
     }
 
     async function deleteWakeDevice(deviceId) {
-      if (!confirm('Delete this wake machine?')) return;
+      const device = (state.data.wake?.devices || []).find(item => item.id === deviceId);
+      const confirmed = await confirmAction({
+        title: 'Delete wake machine?',
+        message: `Remove ${device?.name || 'this machine'} from Wake-on-LAN?`,
+        action: 'Delete',
+      });
+      if (!confirmed) return;
       await api(`/api/wol/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
       state.wakeMessages.delete(deviceId);
       await refreshDashboard();
@@ -1933,7 +2026,13 @@
     }
 
     async function deleteSite(siteId) {
-      if (!confirm('Delete this site check?')) return;
+      const site = (state.data.sites?.sites || []).find(item => item.id === siteId);
+      const confirmed = await confirmAction({
+        title: 'Delete status check?',
+        message: `Remove ${site?.name || 'this status check'} from monitoring?`,
+        action: 'Delete',
+      });
+      if (!confirmed) return;
       await api(`/api/sites/${encodeURIComponent(siteId)}`, { method: 'DELETE' });
       await refreshDashboard();
     }
