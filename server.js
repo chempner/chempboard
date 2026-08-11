@@ -1927,6 +1927,50 @@ function networkIntegrationSiteName(site) {
   return asText(site?.name || site?.meta?.name || site?.siteName || site?.site_name || site?.displayName || site?.description || '', 160);
 }
 
+function arrayValue(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function hasNetworkApplicationSignal(value) {
+  if (!value) return false;
+  if (Array.isArray(value)) return value.some(item => hasNetworkApplicationSignal(item));
+  if (typeof value === 'string') return value.toLowerCase() === 'network';
+  if (typeof value !== 'object') return false;
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key.toLowerCase() === 'network') {
+      if (child && typeof child === 'object') {
+        return child.supported !== false && child.required !== false;
+      }
+      return child !== false;
+    }
+    if (hasNetworkApplicationSignal(child)) return true;
+  }
+  return false;
+}
+
+function hostRunsNetworkApplication(host) {
+  const sources = [
+    host?.applications,
+    host?.apps,
+    host?.controllers,
+    host?.userData?.apps,
+    host?.userData?.controllers,
+    host?.userData?.permissions,
+    host?.reportedState?.applications,
+    host?.reportedState?.apps,
+    host?.reportedState?.controllers,
+    ...arrayValue(host?.userData?.consoleGroupMembers).map(member => member?.roleAttributes?.applications),
+  ];
+  if (sources.some(hasNetworkApplicationSignal)) return true;
+
+  const hasApplicationMetadata = sources.some(source => {
+    if (Array.isArray(source)) return source.length;
+    return source && typeof source === 'object' && Object.keys(source).length;
+  });
+  return !hasApplicationMetadata;
+}
+
 function slimUniFiHost(host) {
   const id = asText(host?.id || host?.hostId || host?.hardwareId || '', 220);
   if (!id) return null;
@@ -1942,14 +1986,38 @@ function slimUniFiHost(host) {
     'reportedState.name',
     'reportedState.hostName',
     'reportedState.hostname',
+    'reportedState.consoleName',
+    'reportedState.deviceName',
+    'reportedState.systemName',
     'reportedState.systemInfo.name',
     'reportedState.systemInfo.hostname',
+    'reportedState.systemInfo.deviceName',
+    'reportedState.systemInfo.model',
+    'reportedState.hardware.name',
+    'reportedState.hardware.shortname',
+    'reportedState.hardware.model',
+    'reportedState.hardware.platform',
+    'reportedState.hardware.displayName',
+    'userData.consoleGroupMembers.0.name',
     'hardwareId',
   ]), 180) || id;
   return {
     id,
     label,
     type: asText(host?.type || host?.hostType || '', 80),
+    network: hostRunsNetworkApplication(host),
+  };
+}
+
+function siteFromUniFiHost(host) {
+  if (!host || !host.network) return null;
+  return {
+    name: 'default',
+    desc: 'Default',
+    hostId: host.id,
+    hostName: host.label,
+    source: 'site-manager',
+    role: '',
   };
 }
 
@@ -2321,6 +2389,7 @@ async function collectUniFi() {
   async function collectUniFiSites() {
     const rows = [];
     const endpoints = [];
+    const hostRows = [];
     let lastError = null;
 
     for (const prefix of parseUniFiPrefixes()) {
@@ -2384,6 +2453,7 @@ async function collectUniFi() {
             const result = await requestSiteManagerRows(managerBaseUrl, source.pathname, source.label, source.paged);
             const hosts = result.rows.map(slimUniFiHost).filter(Boolean);
             for (const host of hosts) hostsById.set(host.id, host);
+            hostRows.push(...hosts);
             endpoints.push({ ...result.endpoint, count: hosts.length });
           } catch (err) {
             lastError = err;
@@ -2410,6 +2480,69 @@ async function collectUniFi() {
           }
         }
       }
+
+      for (const managerBaseUrl of siteManagerApiBaseUrls(baseUrl)) {
+        const hostsMissingSites = hostRows.filter(item => item.network && !rows.some(site => (
+          asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220) === item.id
+        )));
+        for (const host of hostsMissingSites) {
+          for (const connectorPrefix of ['network', 'proxy/network']) {
+            const sitesPath = `/v1/connector/consoles/${encodeURIComponent(host.id)}/${connectorPrefix}/integration/v1/sites`;
+            try {
+              const result = await requestNetworkIntegrationSites(managerBaseUrl, sitesPath, `${managerBaseUrl}${sitesPath}`);
+              const pickerSites = result.sites.map(site => ({
+                ...site,
+                name: networkIntegrationSiteName(site) || site?.internalReference || 'default',
+                siteId: networkIntegrationSiteKey(site),
+                hostId: host.id,
+                hostName: host.label,
+                source: 'network-integration',
+              }));
+              rows.push(...pickerSites);
+              endpoints.push({ ...result.endpoint, name: 'network sites for picker', count: pickerSites.length });
+              if (pickerSites.length) break;
+            } catch (err) {
+              lastError = err;
+              endpoints.push({ name: 'network sites for picker', ok: false, path: `${managerBaseUrl}${sitesPath}`, error: err.message, status: err.status || null });
+            }
+          }
+        }
+      }
+
+      if (rows.length <= 1) {
+        for (const prefix of parseUniFiPrefixes()) {
+          const prefixClean = prefix.replace(/\/+$/, '');
+          const sitesPath = `${prefixClean}/integration/v1/sites`.replace(/^\/?/, '/');
+          try {
+            const result = await requestNetworkIntegrationSites(baseUrl, sitesPath, sitesPath);
+            const pickerSites = result.sites.map(site => ({
+              ...site,
+              name: networkIntegrationSiteName(site) || site?.internalReference || 'default',
+              siteId: networkIntegrationSiteKey(site),
+              source: 'network-integration',
+            }));
+            rows.push(...pickerSites);
+            endpoints.push({ ...result.endpoint, name: 'network sites for picker', count: pickerSites.length });
+          } catch (err) {
+            lastError = err;
+            endpoints.push({ name: 'network sites for picker', ok: false, path: sitesPath, error: err.message, status: err.status || null });
+          }
+        }
+      }
+    }
+
+    const hostsWithoutSites = hostRows
+      .filter(host => !rows.some(site => asText(site?.hostId || site?.host_id || site?.host?.id || site?.host?.hostId || '', 220) === host.id))
+      .map(siteFromUniFiHost)
+      .filter(Boolean);
+    rows.push(...hostsWithoutSites);
+    if (hostsWithoutSites.length) {
+      endpoints.push({
+        name: 'site manager host defaults',
+        ok: true,
+        path: 'derived from /v1/hosts',
+        count: hostsWithoutSites.length,
+      });
     }
 
     const sites = uniqueUniFiSites(rows, unifiSite, unifiHostId, unifiSiteId);

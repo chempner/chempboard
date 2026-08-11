@@ -1360,7 +1360,12 @@
       const current = String(currentSite || 'default');
       const selectedKey = currentKey || unifiSiteKey(current, state.data?.unifi?.hostId || state.settings?.unifiHostId, state.data?.unifi?.siteId || state.settings?.unifiSiteId);
       return normalizedUniFiSites(sites, current, selectedKey).map(site => {
-        const details = [site.name !== site.label ? site.name : '', site.role, site.source === 'site-manager' ? 'Site Manager' : ''].filter(Boolean).join(' - ');
+        const sourceLabel = site.source === 'site-manager'
+          ? 'Site Manager'
+          : site.source === 'network-integration'
+            ? 'Network Integration'
+            : '';
+        const details = [site.name !== site.label ? site.name : '', site.role, sourceLabel].filter(Boolean).join(' - ');
         const label = details ? `${site.label} (${details})` : site.label;
         return `<option value="${escapeHtml(site.key)}" data-name="${escapeHtml(site.name)}" data-host-id="${escapeHtml(site.hostId)}" data-site-id="${escapeHtml(site.siteId)}" ${site.key === selectedKey ? 'selected' : ''}>${escapeHtml(label)}</option>`;
       }).join('');
