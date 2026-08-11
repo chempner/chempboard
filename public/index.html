@@ -1524,6 +1524,18 @@
               <span>Bind port</span>
               <input name="wolBindPort" type="number" min="0" max="65535" value="${escapeHtml(settings.wolBindPort || '')}" />
             </label>
+            <label>
+              <span>L2 packet mode</span>
+              <select name="wolL2Mode">
+                <option value="auto" ${settings.wolL2Mode === 'auto' || !settings.wolL2Mode ? 'selected' : ''}>Auto</option>
+                <option value="on" ${settings.wolL2Mode === 'on' ? 'selected' : ''}>On</option>
+                <option value="off" ${settings.wolL2Mode === 'off' ? 'selected' : ''}>Off</option>
+              </select>
+            </label>
+            <label>
+              <span>L2 interface</span>
+              <input name="wolL2Interface" value="${escapeHtml(settings.wolL2Interface || '')}" placeholder="eno1, br0, eth0" />
+            </label>
           </section>
           <div class="notice full" id="settings-status"></div>
           <div class="page-actions full">
@@ -1649,20 +1661,26 @@
 
     function describeWakeAttempts(attempts) {
       if (!Array.isArray(attempts) || !attempts.length) return '';
-      const sent = attempts.filter(attempt => attempt.ok).length;
+      const sentAttempts = attempts.filter(attempt => !attempt.skipped);
+      const sent = sentAttempts.filter(attempt => attempt.ok).length;
       const grouped = new Map();
-      for (const attempt of attempts) {
+      for (const attempt of sentAttempts) {
         if (!attempt.target) continue;
-        const modes = grouped.get(attempt.target) || new Set();
+        const key = attempt.mode === 'l2' && attempt.interface ? `${attempt.target} via ${attempt.interface}` : attempt.target;
+        const modes = grouped.get(key) || new Set();
         if (attempt.mode) modes.add(attempt.mode);
-        grouped.set(attempt.target, modes);
+        grouped.set(key, modes);
       }
       const targets = [...grouped.entries()].map(([target, modes]) => {
         const modeText = modes.size ? ` (${[...modes].join(', ')})` : '';
         return `${target}${modeText}`;
       });
       const targetText = targets.length ? ` to ${targets.join(', ')}` : '';
-      return `${sent}/${attempts.length} UDP sends${targetText}`;
+      const skipped = attempts
+        .filter(attempt => attempt.skipped && attempt.error)
+        .map(attempt => `${attempt.mode || 'send'} skipped: ${attempt.error}`);
+      const skippedText = skipped.length ? ` - ${skipped.join(' - ')}` : '';
+      return `${sent}/${sentAttempts.length} wake sends${targetText}${skippedText}`;
     }
 
     function describeWakeStatus(status) {
@@ -1796,6 +1814,8 @@
         wolRepeatCount: Number(field('wolRepeatCount').value || 3),
         wolBindAddress: field('wolBindAddress').value,
         wolBindPort: field('wolBindPort').value,
+        wolL2Mode: field('wolL2Mode').value,
+        wolL2Interface: field('wolL2Interface').value,
       };
 
       try {

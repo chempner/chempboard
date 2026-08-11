@@ -2,10 +2,13 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+RUN apk add --no-cache python3
+
 COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY server.js ./
+COPY scripts ./scripts
 COPY public ./public
 
 RUN mkdir -p /data

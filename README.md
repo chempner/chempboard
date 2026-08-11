@@ -28,6 +28,8 @@ Required environment:
 | `WOL_EXTRA_BROADCASTS` | Optional extra comma-separated broadcast targets, for example `10.13.37.255` |
 | `WOL_REPEAT_COUNT` | Number of UDP wake sends per target, defaults to `3` |
 | `WOL_BIND_ADDRESS` / `WOL_BIND_PORT` | Optional local UDP bind settings for wake packets |
+| `WOL_L2_MODE` | Raw Ethernet WOL mode: `auto`, `on`, or `off`; defaults to `auto` |
+| `WOL_L2_INTERFACE` | Optional interface for L2 WOL, for example `eno1`, `br0`, or `eth0` |
 | `WOL_DEVICES` | Optional JSON seed for first-run wake machines |
 | `HOME_ASSISTANT_URL` / `HOME_ASSISTANT_TOKEN` | Home Assistant REST API access |
 | `UNIFI_URL` / `UNIFI_USERNAME` / `UNIFI_PASSWORD` | UniFi Network local controller access |
@@ -66,17 +68,18 @@ Each machine stores:
 | `tags` | `["studio"]` |
 | `enabled` | `true` |
 
-For GPTWOL/ChempWOL-style setups, enter the machine IP, for example `10.13.37.33`. ChempBoard first mirrors ChempWOL by enabling `SO_BROADCAST` and sending the magic packet to that exact saved target. It then also tries a true unicast packet, an inferred `/24` directed broadcast such as `10.13.37.255`, and the configured default broadcast such as `255.255.255.255`. It records every UDP send attempt. The awake check is separate from Wake-on-LAN; leave it blank, or set it to a TCP service that is actually open when the machine is on, such as SSH `22` or RDP `3389`.
+For GPTWOL-style setups, enter the machine IP, for example `10.13.37.33`. ChempBoard sends a GPTWOL-style broadcast packet to `255.255.255.255:9`, then also tries the saved target, an inferred `/24` directed broadcast such as `10.13.37.255`, and any configured extra broadcasts. If `WOL_L2_MODE=auto` or `on`, ChempBoard can also send a raw Ethernet Wake-on-LAN frame like GPTWOL's L2 mode. The awake check is separate from Wake-on-LAN; leave it blank, or set it to a TCP service that is actually open when the machine is on, such as SSH `22` or RDP `3389`.
 
-If broadcast packets do not cross Docker networking on your NAS, use a directed subnet broadcast such as `10.13.37.255` or the host-network compose file below.
+Wake-on-LAN from Docker needs host networking to reach the LAN reliably. GPTWOL documents this requirement too. On TrueNAS, prefer `docker-compose.truenas.host-network.yml` for ChempBoard if you want WOL to work.
 
 If the wake log says the UDP packets were sent but the machine stays asleep:
 
 1. Prefer `10.13.37.255` as the machine broadcast on a `10.13.37.x/24` network.
 2. Run ChempBoard with `docker-compose.truenas.host-network.yml` so packets leave from the NAS host network instead of Docker bridge networking.
-3. Confirm the target machine is wired Ethernet, not Wi-Fi, and has Wake-on-LAN enabled in BIOS/UEFI and the OS.
-4. On Windows, disable Fast Startup and enable "Wake on Magic Packet" for the NIC.
-5. If the machine is on another VLAN, configure a directed broadcast or WOL relay on the network side.
+3. Leave `WOL_L2_MODE=auto`; if the log says L2 was skipped, set `WOL_L2_INTERFACE` to the NAS LAN interface shown by `ip addr`, such as `eno1` or `br0`.
+4. Confirm the target machine is wired Ethernet, not Wi-Fi, and has Wake-on-LAN enabled in BIOS/UEFI and the OS.
+5. On Windows, disable Fast Startup and enable "Wake on Magic Packet" for the NIC.
+6. If the machine is on another VLAN, configure a directed broadcast or WOL relay on the network side.
 
 ## Local Run
 

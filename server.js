@@ -8,6 +8,7 @@ const http = require('http');
 const https = require('https');
 const dgram = require('dgram');
 const net = require('net');
+const os = require('os');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 
@@ -29,6 +30,7 @@ const SETTINGS_FILE = process.env.SETTINGS_FILE || path.join(DATA_DIR, 'settings
 const SITES_FILE = process.env.SITES_FILE || path.join(DATA_DIR, 'sites.json');
 const WOL_DEVICES_FILE = process.env.WOL_DEVICES_FILE || path.join(DATA_DIR, 'wol-devices.json');
 const WAKE_LOG_FILE = process.env.WAKE_LOG_FILE || path.join(DATA_DIR, 'wake-log.json');
+const L2_WOL_SCRIPT = path.join(__dirname, 'scripts', 'l2-wol.py');
 const API_TIMEOUT_MS = clampInt(process.env.API_TIMEOUT_MS, 6500, 1000, 60000);
 const SITE_TIMEOUT_MS = clampInt(process.env.SITE_TIMEOUT_MS, 4500, 1000, 60000);
 const BACKGROUND_REFRESH_INTERVAL_MS = clampInt(process.env.BACKGROUND_REFRESH_INTERVAL_MS, 300000, 60000, 300000);
@@ -454,6 +456,13 @@ function intSetting(key, envName, fallback, min, max) {
   return clampInt(settingValue(key, envName, String(fallback)), fallback, min, max);
 }
 
+function wolL2ModeSetting() {
+  const mode = stringSetting('wolL2Mode', 'WOL_L2_MODE', 'auto', 24).toLowerCase();
+  if (['1', 'true', 'yes', 'on', 'enabled', 'always'].includes(mode)) return 'on';
+  if (['0', 'false', 'no', 'off', 'disabled', 'never'].includes(mode)) return 'off';
+  return 'auto';
+}
+
 function publicSettings() {
   const settings = loadSettings();
   const hasWolBindPort = process.env.WOL_BIND_PORT !== undefined || Object.prototype.hasOwnProperty.call(settings, 'wolBindPort');
@@ -480,6 +489,8 @@ function publicSettings() {
     wolRepeatCount: intSetting('wolRepeatCount', 'WOL_REPEAT_COUNT', 3, 1, 10),
     wolBindAddress: stringSetting('wolBindAddress', 'WOL_BIND_ADDRESS', '', 120),
     wolBindPort: hasWolBindPort ? intSetting('wolBindPort', 'WOL_BIND_PORT', 0, 0, 65535) : '',
+    wolL2Mode: wolL2ModeSetting(),
+    wolL2Interface: stringSetting('wolL2Interface', 'WOL_L2_INTERFACE', '', 80),
   };
 }
 
@@ -501,6 +512,8 @@ function updateSettings(raw = {}) {
     ['wolDefaultBroadcast', 120],
     ['wolExtraBroadcasts', 1200],
     ['wolBindAddress', 120],
+    ['wolL2Mode', 24],
+    ['wolL2Interface', 80],
   ];
 
   for (const [key, maxLength] of textFields) {
@@ -708,6 +721,119 @@ function isAwakeCheckHost(target) {
   return true;
 }
 
+function ipv4ToInt(value) {
+  const parts = String(value || '').split('.').map(part => Number(part));
+  if (parts.length !== 4 || !parts.every(part => Number.isInteger(part) && part >= 0 && part <= 255)) return null;
+  return parts.reduce((acc, part) => ((acc << 8) + part) >>> 0, 0);
+}
+
+function sameIpv4Subnet(address, netmask, target) {
+  const addressInt = ipv4ToInt(address);
+  const maskInt = ipv4ToInt(netmask);
+  const targetInt = ipv4ToInt(target);
+  if (addressInt === null || maskInt === null || targetInt === null) return false;
+  return (addressInt & maskInt) === (targetInt & maskInt);
+}
+
+function defaultRouteInterface() {
+  try {
+    const rows = readFileSafe('/proc/net/route').trim().split(/\r?\n/).slice(1);
+    for (const row of rows) {
+      const columns = row.trim().split(/\s+/);
+      if (columns[1] === '00000000') return columns[0];
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function interfaceDetails(name) {
+  const rows = os.networkInterfaces()[name] || [];
+  return rows
+    .filter(row => row.family === 'IPv4' && !row.internal)
+    .map(row => ({
+      address: row.address,
+      netmask: row.netmask,
+      mac: row.mac,
+    }));
+}
+
+function interfaceSummary(name) {
+  return interfaceDetails(name).map(row => `${row.address}/${row.netmask}`).join(', ');
+}
+
+function targetHostForL2(device) {
+  const primary = parseWakeTarget(device.broadcast).host;
+  if (isUnicastTarget(primary)) return primary;
+  const checkHost = parseWakeTarget(device.checkHost || '').host;
+  if (isUnicastTarget(checkHost)) return checkHost;
+  return '';
+}
+
+function resolveL2Interface(device) {
+  const configured = stringSetting('wolL2Interface', 'WOL_L2_INTERFACE', '', 80);
+  if (configured) {
+    const details = interfaceDetails(configured);
+    return details.length
+      ? { interface: configured, reason: 'configured', details }
+      : { interface: configured, reason: 'configured but no IPv4 details visible', details: [] };
+  }
+
+  const target = targetHostForL2(device);
+  const defaultInterface = defaultRouteInterface();
+  const interfaces = os.networkInterfaces();
+  const candidates = Object.keys(interfaces)
+    .map(name => ({ name, details: interfaceDetails(name), defaultRoute: name === defaultInterface }))
+    .filter(candidate => candidate.details.length);
+
+  if (target) {
+    const sameSubnet = candidates.find(candidate => candidate.details.some(row => sameIpv4Subnet(row.address, row.netmask, target)));
+    if (sameSubnet) return { interface: sameSubnet.name, reason: `same subnet as ${target}`, details: sameSubnet.details };
+  }
+
+  const defaultCandidate = candidates.find(candidate => candidate.defaultRoute);
+  if (defaultCandidate) return { interface: defaultCandidate.name, reason: 'default route', details: defaultCandidate.details };
+  if (candidates.length) return { interface: candidates[0].name, reason: 'first IPv4 interface', details: candidates[0].details };
+  return { interface: '', reason: 'no non-loopback IPv4 interface visible', details: [] };
+}
+
+function isLikelyDockerBridgeInterface(plan, device) {
+  if (!plan?.details?.length) return false;
+  const target = targetHostForL2(device);
+  if (target && plan.details.some(row => sameIpv4Subnet(row.address, row.netmask, target))) return false;
+  return plan.details.some(row => /^02:42:/i.test(row.mac || '') || /^172\.(1[6-9]|2\d|3[0-1])\./.test(row.address || ''));
+}
+
+function l2WakePlanForDevice(device) {
+  const mode = wolL2ModeSetting();
+  if (mode === 'off') return { enabled: false, mode, reason: 'L2 WOL is off' };
+  const plan = resolveL2Interface(device);
+  if (!plan.interface) return { enabled: false, mode, reason: plan.reason };
+  if (mode === 'auto' && isLikelyDockerBridgeInterface(plan, device)) {
+    return {
+      enabled: false,
+      mode,
+      interface: plan.interface,
+      reason: `auto skipped ${plan.interface}; it looks like Docker bridge networking (${interfaceSummary(plan.interface) || 'no LAN address'})`,
+    };
+  }
+  return { enabled: true, mode, ...plan };
+}
+
+async function sendL2WakePacketToInterface(device, interfaceName) {
+  const { stdout } = await execFileAsync('python3', [L2_WOL_SCRIPT, device.mac, interfaceName], {
+    timeout: 5000,
+    maxBuffer: 32 * 1024,
+  });
+  const text = String(stdout || '').trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { interface: interfaceName, output: text };
+  }
+}
+
 function wakeTargetsForDevice(device) {
   const extraTargets = parseList(stringSetting('wolExtraBroadcasts', 'WOL_EXTRA_BROADCASTS', '', 1200).replace(/\n/g, ','))
     .map(target => parseWakeTarget(target).host);
@@ -726,14 +852,16 @@ function wakeTargetsForDevice(device) {
     targets.push({ target, mode });
   }
 
-  // First send mirrors ChempWOL/GPTWOL exactly: SO_BROADCAST enabled to the saved target.
-  if (primaryTarget) {
+  // GPTWOL's normal path sends the magic packet to the global LAN broadcast.
+  add('255.255.255.255', 'gptwol');
+
+  if (primaryTarget && primaryTarget !== '255.255.255.255') {
     add(primaryTarget, 'gptwol');
     if (isUnicastTarget(primaryTarget)) add(primaryTarget, 'unicast');
   }
 
   for (const target of targetTexts) {
-    if (target === primaryTarget) continue;
+    if (target === primaryTarget || target === '255.255.255.255') continue;
     if (isUnicastTarget(target)) {
       add(target, 'unicast');
     } else {
@@ -792,9 +920,16 @@ function sendWakePacketToTarget(device, target, mode) {
         }
       }
       const local = socket.address();
+      const routeInterface = defaultRouteInterface();
       socket.send(packet, 0, packet.length, device.port, target, err => {
         if (err) finish(err);
-        else finish(null, { bytes: packet.length, localAddress: local.address, localPort: local.port });
+        else finish(null, {
+          bytes: packet.length,
+          localAddress: local.address,
+          localPort: local.port,
+          interface: routeInterface,
+          interfaceAddresses: routeInterface ? interfaceSummary(routeInterface) : '',
+        });
       });
     });
   });
@@ -838,6 +973,42 @@ async function sendWakePacket(device) {
   const repeatCount = intSetting('wolRepeatCount', 'WOL_REPEAT_COUNT', 3, 1, 10);
   const targets = wakeTargetsForDevice(device);
   const attempts = [];
+  const l2Plan = l2WakePlanForDevice(device);
+
+  if (l2Plan.enabled) {
+    const attempt = {
+      target: 'ff:ff:ff:ff:ff:ff',
+      mode: 'l2',
+      port: null,
+      interface: l2Plan.interface,
+      interfaceAddresses: interfaceSummary(l2Plan.interface),
+      index: 1,
+      ok: false,
+      at: new Date().toISOString(),
+    };
+    try {
+      const result = await sendL2WakePacketToInterface(device, l2Plan.interface);
+      attempt.ok = true;
+      attempt.bytes = result.bytes;
+      attempt.sourceMac = result.sourceMac;
+      attempt.reason = l2Plan.reason;
+    } catch (err) {
+      attempt.error = err.message;
+      attempt.reason = l2Plan.reason;
+    }
+    attempts.push(attempt);
+  } else if (l2Plan.mode === 'auto') {
+    attempts.push({
+      target: 'ff:ff:ff:ff:ff:ff',
+      mode: 'l2',
+      port: null,
+      interface: l2Plan.interface || '',
+      skipped: true,
+      ok: false,
+      error: l2Plan.reason,
+      at: new Date().toISOString(),
+    });
+  }
 
   for (const { target, mode } of targets) {
     for (let index = 0; index < repeatCount; index += 1) {
@@ -855,6 +1026,8 @@ async function sendWakePacket(device) {
         if (result?.bytes) attempt.bytes = result.bytes;
         if (result?.localAddress) attempt.localAddress = result.localAddress;
         if (result?.localPort !== undefined) attempt.localPort = result.localPort;
+        if (result?.interface) attempt.interface = result.interface;
+        if (result?.interfaceAddresses) attempt.interfaceAddresses = result.interfaceAddresses;
       } catch (err) {
         attempt.error = err.message;
       }
@@ -2774,7 +2947,7 @@ function invalidateSnapshotsForSettings(raw = {}) {
   if (touches(['unifiUrl', 'unifiUsername', 'unifiPassword', 'clearUnifiPassword', 'unifiApiKey', 'clearUnifiApiKey', 'unifiSite', 'unifiHostId', 'unifiSiteId', 'unifiInsecure', 'unifiLoginPaths', 'unifiApiPrefixes'])) {
     invalidateBackgroundSnapshot('unifi');
   }
-  if (touches(['wolDefaultBroadcast', 'wolDefaultPort', 'wolExtraBroadcasts', 'wolRepeatCount', 'wolBindAddress', 'wolBindPort'])) {
+  if (touches(['wolDefaultBroadcast', 'wolDefaultPort', 'wolExtraBroadcasts', 'wolRepeatCount', 'wolBindAddress', 'wolBindPort', 'wolL2Mode', 'wolL2Interface'])) {
     invalidateBackgroundSnapshot('wake');
   }
   if (touches(['nasPublicUrl', 'homeAssistantUrl', 'unifiUrl'])) {
