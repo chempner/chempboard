@@ -764,7 +764,6 @@
       editingSiteId: null,
       editingWakeDeviceId: null,
       wakeMessages: new Map(),
-      statusRefreshTimer: null,
     };
 
     const content = document.getElementById('content');
@@ -918,19 +917,6 @@
         content.innerHTML = renderSettings();
         bindSettingsForm();
       }
-      scheduleStatusRefreshPoll();
-    }
-
-    function scheduleStatusRefreshPoll() {
-      if (state.statusRefreshTimer) {
-        clearTimeout(state.statusRefreshTimer);
-        state.statusRefreshTimer = null;
-      }
-      if (!state.data?.sites?.refreshing) return;
-      state.statusRefreshTimer = setTimeout(() => {
-        state.statusRefreshTimer = null;
-        if (!document.hidden) refreshDashboard({ quiet: true });
-      }, 2500);
     }
 
     function renderOverview() {

@@ -31,7 +31,12 @@ const WOL_DEVICES_FILE = process.env.WOL_DEVICES_FILE || path.join(DATA_DIR, 'wo
 const WAKE_LOG_FILE = process.env.WAKE_LOG_FILE || path.join(DATA_DIR, 'wake-log.json');
 const API_TIMEOUT_MS = clampInt(process.env.API_TIMEOUT_MS, 6500, 1000, 60000);
 const SITE_TIMEOUT_MS = clampInt(process.env.SITE_TIMEOUT_MS, 4500, 1000, 60000);
-const SITE_STATUS_CACHE_MS = clampInt(process.env.SITE_STATUS_CACHE_MS, 60000, 5000, 600000);
+const BACKGROUND_REFRESH_INTERVAL_MS = clampInt(process.env.BACKGROUND_REFRESH_INTERVAL_MS, 300000, 60000, 300000);
+const STATUS_CHECK_INTERVAL_MS = clampInt(process.env.STATUS_CHECK_INTERVAL_MS || process.env.SITE_STATUS_INTERVAL_MS || process.env.SITE_STATUS_CACHE_MS, BACKGROUND_REFRESH_INTERVAL_MS, 60000, 300000);
+const NAS_REFRESH_INTERVAL_MS = clampInt(process.env.NAS_REFRESH_INTERVAL_MS, 60000, 60000, 300000);
+const WAKE_REFRESH_INTERVAL_MS = clampInt(process.env.WAKE_REFRESH_INTERVAL_MS, 60000, 60000, 300000);
+const HOME_ASSISTANT_REFRESH_INTERVAL_MS = clampInt(process.env.HOME_ASSISTANT_REFRESH_INTERVAL_MS, BACKGROUND_REFRESH_INTERVAL_MS, 60000, 300000);
+const UNIFI_REFRESH_INTERVAL_MS = clampInt(process.env.UNIFI_REFRESH_INTERVAL_MS, BACKGROUND_REFRESH_INTERVAL_MS, 60000, 300000);
 const SITE_CHECK_INSECURE = parseBool(process.env.SITE_CHECK_INSECURE);
 const NAS_PROC_PATH = process.env.NAS_PROC_PATH || (fs.existsSync('/host/proc/uptime') ? '/host/proc' : '/proc');
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
@@ -39,6 +44,12 @@ const HA_LOW_BATTERY = clampInt(process.env.HA_LOW_BATTERY, 20, 1, 90);
 const LOG_LINE_LIMIT = clampInt(process.env.LOG_LINE_LIMIT, 120, 20, 500);
 let siteStatusCache = null;
 let siteStatusRefreshPromise = null;
+const backgroundSnapshots = {
+  nas: { cache: null, promise: null, intervalMs: NAS_REFRESH_INTERVAL_MS },
+  wake: { cache: null, promise: null, intervalMs: WAKE_REFRESH_INTERVAL_MS },
+  homeAssistant: { cache: null, promise: null, intervalMs: HOME_ASSISTANT_REFRESH_INTERVAL_MS },
+  unifi: { cache: null, promise: null, intervalMs: UNIFI_REFRESH_INTERVAL_MS },
+};
 const CHEMPNER_TRAEFIK_STATUS_SITES = [
   { name: 'AdGuard', url: 'https://adguard.chempner.ch', group: 'Network', kind: 'dns', tags: ['traefik'] },
   { name: 'Auth Manager', url: 'https://auth.chempner.ch', group: 'Auth', kind: 'auth', tags: ['traefik'] },
@@ -1169,17 +1180,22 @@ function pendingSiteResults(sites) {
 }
 
 async function runSiteChecks(sites, fingerprint) {
+  const checkedAt = new Date().toISOString();
   const results = await Promise.all(sites.map(site => checkSite(site)));
+  const nextRefreshAt = new Date(Date.now() + STATUS_CHECK_INTERVAL_MS).toISOString();
   siteStatusCache = {
     fingerprint,
-    checkedAt: new Date().toISOString(),
-    summary: summarizeSiteResults(results, { checking: 0, refreshing: false }),
+    checkedAt,
+    nextRefreshAt,
+    summary: summarizeSiteResults(results, { checking: 0, refreshing: false, collectedAt: checkedAt, nextRefreshAt }),
   };
   return siteStatusCache.summary;
 }
 
-function refreshSiteChecksInBackground(sites, fingerprint) {
+function refreshSiteChecksInBackground() {
   if (siteStatusRefreshPromise) return siteStatusRefreshPromise;
+  const sites = loadSites();
+  const fingerprint = siteStatusFingerprint(sites);
   siteStatusRefreshPromise = runSiteChecks(sites, fingerprint)
     .catch(err => {
       console.warn(`[sites] Background status refresh failed: ${err.message}`);
@@ -1200,18 +1216,20 @@ async function checkAllSites(options = {}) {
   const fingerprint = siteStatusFingerprint(sites);
   if (options.wait) return runSiteChecks(sites, fingerprint);
 
-  const now = Date.now();
-  const cacheTime = siteStatusCache?.checkedAt ? Date.parse(siteStatusCache.checkedAt) : 0;
   const cacheMatches = siteStatusCache?.fingerprint === fingerprint;
   if (cacheMatches && siteStatusCache?.summary) {
-    if (!siteStatusRefreshPromise && now - cacheTime > SITE_STATUS_CACHE_MS) {
-      refreshSiteChecksInBackground(sites, fingerprint);
-    }
-    return { ...siteStatusCache.summary, refreshing: !!siteStatusRefreshPromise };
+    return {
+      ...siteStatusCache.summary,
+      refreshing: !!siteStatusRefreshPromise,
+      nextRefreshAt: siteStatusCache.nextRefreshAt || siteStatusCache.summary.nextRefreshAt || null,
+    };
   }
 
-  refreshSiteChecksInBackground(sites, fingerprint);
-  return summarizeSiteResults(pendingSiteResults(sites), { refreshing: true });
+  return summarizeSiteResults(pendingSiteResults(sites), {
+    refreshing: true,
+    collectedAt: null,
+    nextRefreshAt: siteStatusCache?.nextRefreshAt || null,
+  });
 }
 
 function readFileSafe(filePath) {
@@ -2614,23 +2632,228 @@ async function collectUniFi() {
   };
 }
 
-async function collectDashboard() {
-  const [nas, homeAssistant, unifi, sites, wake] = await Promise.all([
-    collectNasSnapshot().catch(err => ({ configured: true, ok: false, error: err.message })),
-    collectHomeAssistant().catch(err => ({ configured: true, ok: false, error: err.message })),
-    collectUniFi().catch(err => ({ configured: true, ok: false, error: err.message })),
-    checkAllSites().catch(err => ({ total: 0, up: 0, down: 0, disabled: 0, sites: [], error: err.message })),
-    Promise.resolve().then(() => collectWakeSnapshot()).catch(err => ({ total: 0, enabled: 0, disabled: 0, devices: [], log: [], error: err.message })),
-  ]);
+function nextRefreshAt(intervalMs) {
+  return new Date(Date.now() + intervalMs).toISOString();
+}
 
+function snapshotFallbackMessage(sourceName) {
+  return `${sourceName} backend refresh has not completed yet`;
+}
+
+function fallbackNasSnapshot() {
+  return {
+    configured: true,
+    ok: false,
+    collectedAt: null,
+    procPath: fs.existsSync(path.join(NAS_PROC_PATH, 'uptime')) ? NAS_PROC_PATH : '/proc',
+    error: snapshotFallbackMessage('NAS'),
+    uptime: null,
+    load: null,
+    memory: null,
+    cpu: null,
+    network: [],
+    disks: [],
+    docker: { total: 0, running: 0, containers: [] },
+    logs: [],
+  };
+}
+
+function fallbackHomeAssistantSnapshot() {
+  const baseUrl = cleanBaseUrl(stringSetting('homeAssistantUrl', 'HOME_ASSISTANT_URL', '', 600));
+  const token = stringSetting('homeAssistantToken', 'HOME_ASSISTANT_TOKEN', '', 4000);
+  return {
+    configured: !!(baseUrl && token),
+    ok: false,
+    baseUrl,
+    collectedAt: null,
+    error: baseUrl && token ? snapshotFallbackMessage('Home Assistant') : (!baseUrl ? 'HOME_ASSISTANT_URL is not set' : 'HOME_ASSISTANT_TOKEN is not set'),
+    endpoints: [],
+    states: { total: 0, domains: [], problems: [] },
+    eventsCount: 0,
+    servicesCount: 0,
+    systemHealth: null,
+    logbook: [],
+    errorLog: [],
+  };
+}
+
+function fallbackUniFiSnapshot() {
+  const baseUrl = cleanBaseUrl(stringSetting('unifiUrl', 'UNIFI_URL', '', 600));
+  const username = stringSetting('unifiUsername', 'UNIFI_USERNAME', '', 160);
+  const password = stringSetting('unifiPassword', 'UNIFI_PASSWORD', '', 1000);
+  const apiKey = stringSetting('unifiApiKey', 'UNIFI_API_KEY', '', 4000);
+  const unifiSite = stringSetting('unifiSite', 'UNIFI_SITE', 'default', 120) || 'default';
+  const unifiHostId = stringSetting('unifiHostId', 'UNIFI_HOST_ID', '', 220);
+  const unifiSiteId = stringSetting('unifiSiteId', 'UNIFI_SITE_ID', '', 180);
+  const selectedSiteKey = uniFiSiteKey({ name: unifiSite, hostId: unifiHostId, siteId: unifiSiteId });
+  return {
+    configured: !!(baseUrl && (apiKey || (username && password))),
+    ok: false,
+    baseUrl,
+    site: unifiSite,
+    siteKey: selectedSiteKey,
+    hostId: unifiHostId,
+    siteId: unifiSiteId,
+    sites: uniqueUniFiSites([{ name: unifiSite, desc: unifiSite, hostId: unifiHostId, siteId: unifiSiteId }], unifiSite, unifiHostId, unifiSiteId),
+    collectedAt: null,
+    error: baseUrl && (apiKey || (username && password)) ? snapshotFallbackMessage('UniFi') : (!baseUrl ? 'UNIFI_URL is not set' : 'UniFi credentials are not set'),
+    endpoints: [],
+    health: [],
+    overview: summarizeUniFiOverview({ devices: [], clients: [], health: [], events: [], alarms: [], endpoints: [] }),
+    devices: { total: 0, offline: 0, rows: [] },
+    clients: { total: 0, rows: [] },
+    events: [],
+    alarms: [],
+  };
+}
+
+function fallbackWakeSnapshot() {
+  const devices = loadWakeDevices().map(publicWakeDevice);
+  const enabled = devices.filter(device => device.enabled).length;
+  const lastWakeAt = devices
+    .map(device => device.lastWakeAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || null;
+  return {
+    total: devices.length,
+    enabled,
+    disabled: devices.length - enabled,
+    lastWakeAt,
+    devices,
+    log: readWakeLog(80),
+    collectedAt: null,
+  };
+}
+
+function cacheBackgroundSnapshot(key, snapshot) {
+  const state = backgroundSnapshots[key];
+  const collectedAt = snapshot?.collectedAt || new Date().toISOString();
+  state.cache = {
+    snapshot: { ...snapshot, collectedAt },
+    collectedAt,
+    nextRefreshAt: nextRefreshAt(state.intervalMs),
+  };
+  return getBackgroundSnapshot(key);
+}
+
+function getBackgroundSnapshot(key, fallbackFactory = () => ({})) {
+  const state = backgroundSnapshots[key];
+  if (state?.cache?.snapshot) {
+    return {
+      ...state.cache.snapshot,
+      refreshing: !!state.promise,
+      nextRefreshAt: state.cache.nextRefreshAt,
+    };
+  }
+  return {
+    ...fallbackFactory(),
+    refreshing: true,
+    nextRefreshAt: null,
+  };
+}
+
+function refreshBackgroundSnapshot(key, collector, fallbackFactory) {
+  const state = backgroundSnapshots[key];
+  if (state.promise) return state.promise;
+  state.promise = Promise.resolve()
+    .then(collector)
+    .then(snapshot => cacheBackgroundSnapshot(key, snapshot))
+    .catch(err => {
+      console.warn(`[refresh] ${key} refresh failed: ${err.message}`);
+      const existing = state.cache?.snapshot || fallbackFactory();
+      return cacheBackgroundSnapshot(key, {
+        ...existing,
+        ok: false,
+        error: err.message,
+        collectedAt: new Date().toISOString(),
+      });
+    })
+    .finally(() => {
+      state.promise = null;
+    });
+  return state.promise;
+}
+
+function getNasSnapshot() {
+  return getBackgroundSnapshot('nas', fallbackNasSnapshot);
+}
+
+function refreshNasSnapshot() {
+  return refreshBackgroundSnapshot('nas', collectNasSnapshot, fallbackNasSnapshot);
+}
+
+function getWakeSnapshot() {
+  return getBackgroundSnapshot('wake', fallbackWakeSnapshot);
+}
+
+function refreshWakeSnapshot() {
+  return refreshBackgroundSnapshot('wake', collectWakeSnapshot, fallbackWakeSnapshot);
+}
+
+function getHomeAssistantSnapshot() {
+  return getBackgroundSnapshot('homeAssistant', fallbackHomeAssistantSnapshot);
+}
+
+function refreshHomeAssistantSnapshot() {
+  return refreshBackgroundSnapshot('homeAssistant', collectHomeAssistant, fallbackHomeAssistantSnapshot);
+}
+
+function getUniFiSnapshot() {
+  return getBackgroundSnapshot('unifi', fallbackUniFiSnapshot);
+}
+
+function refreshUniFiSnapshot() {
+  return refreshBackgroundSnapshot('unifi', collectUniFi, fallbackUniFiSnapshot);
+}
+
+function scheduleBackendRefresh(refreshFn, delayMs = 0) {
+  const timer = setTimeout(() => {
+    Promise.resolve(refreshFn()).catch(err => {
+      console.warn(`[refresh] Scheduled refresh failed: ${err.message}`);
+    });
+  }, delayMs);
+  timer.unref?.();
+  return timer;
+}
+
+function scheduleAllBackendRefreshes(delayMs = 0) {
+  scheduleBackendRefresh(refreshNasSnapshot, delayMs);
+  scheduleBackendRefresh(refreshWakeSnapshot, delayMs + 150);
+  scheduleBackendRefresh(refreshHomeAssistantSnapshot, delayMs + 300);
+  scheduleBackendRefresh(refreshUniFiSnapshot, delayMs + 450);
+  scheduleBackendRefresh(refreshSiteChecksInBackground, delayMs + 600);
+}
+
+function startBackendPollers() {
+  scheduleAllBackendRefreshes(100);
+  const pollers = [
+    ['nas', refreshNasSnapshot, NAS_REFRESH_INTERVAL_MS],
+    ['wake', refreshWakeSnapshot, WAKE_REFRESH_INTERVAL_MS],
+    ['homeAssistant', refreshHomeAssistantSnapshot, HOME_ASSISTANT_REFRESH_INTERVAL_MS],
+    ['unifi', refreshUniFiSnapshot, UNIFI_REFRESH_INTERVAL_MS],
+    ['sites', refreshSiteChecksInBackground, STATUS_CHECK_INTERVAL_MS],
+  ];
+  for (const [name, refreshFn, intervalMs] of pollers) {
+    const timer = setInterval(() => {
+      Promise.resolve(refreshFn()).catch(err => {
+        console.warn(`[refresh] ${name} interval failed: ${err.message}`);
+      });
+    }, intervalMs);
+    timer.unref?.();
+  }
+  console.log(`[chempboard] Backend refresh: sites ${Math.round(STATUS_CHECK_INTERVAL_MS / 1000)}s, UniFi ${Math.round(UNIFI_REFRESH_INTERVAL_MS / 1000)}s, Home Assistant ${Math.round(HOME_ASSISTANT_REFRESH_INTERVAL_MS / 1000)}s`);
+}
+
+async function collectDashboard() {
   return {
     app: { name: APP_NAME, label: APP_LABEL },
     collectedAt: new Date().toISOString(),
-    nas,
-    homeAssistant,
-    unifi,
-    sites,
-    wake,
+    nas: getNasSnapshot(),
+    homeAssistant: getHomeAssistantSnapshot(),
+    unifi: getUniFiSnapshot(),
+    sites: await checkAllSites(),
+    wake: getWakeSnapshot(),
   };
 }
 
@@ -2762,7 +2985,9 @@ app.get('/api/settings', requireAuth, requireAdmin, (_req, res) => {
 
 app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
   try {
-    res.json({ settings: updateSettings(req.body || {}) });
+    const settings = updateSettings(req.body || {});
+    scheduleAllBackendRefreshes(250);
+    res.json({ settings });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Could not save settings' });
   }
@@ -2772,24 +2997,24 @@ app.get('/api/dashboard', requireAuth, async (_req, res) => {
   res.json(await collectDashboard());
 });
 
-app.get('/api/nas', requireAuth, async (_req, res) => {
-  res.json(await collectNasSnapshot());
+app.get('/api/nas', requireAuth, (_req, res) => {
+  res.json(getNasSnapshot());
 });
 
-app.get('/api/home-assistant', requireAuth, async (_req, res) => {
-  res.json(await collectHomeAssistant());
+app.get('/api/home-assistant', requireAuth, (_req, res) => {
+  res.json(getHomeAssistantSnapshot());
 });
 
-app.get('/api/unifi', requireAuth, async (_req, res) => {
-  res.json(await collectUniFi());
+app.get('/api/unifi', requireAuth, (_req, res) => {
+  res.json(getUniFiSnapshot());
 });
 
 app.get('/api/sites', requireAuth, (_req, res) => {
   res.json({ sites: loadSites().map(publicSite) });
 });
 
-app.get('/api/sites/status', requireAuth, async (req, res) => {
-  res.json(await checkAllSites({ wait: req.query.wait === '1' }));
+app.get('/api/sites/status', requireAuth, async (_req, res) => {
+  res.json(await checkAllSites());
 });
 
 app.get('/api/wol/devices', requireAuth, (_req, res) => {
@@ -2803,6 +3028,7 @@ app.post('/api/wol/devices', requireAuth, requireAdmin, (req, res) => {
     device.id = uniqueWakeDeviceId(devices, req.body?.id || device.name);
     devices.push(device);
     writeWakeDevices(devices);
+    scheduleBackendRefresh(refreshWakeSnapshot, 250);
     res.status(201).json({ device: publicWakeDevice(device) });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Could not create device' });
@@ -2817,6 +3043,7 @@ app.put('/api/wol/devices/:id', requireAuth, requireAdmin, (req, res) => {
     const device = normalizeDevice({ ...devices[index], ...req.body, id: devices[index].id }, devices[index]);
     devices[index] = device;
     writeWakeDevices(devices);
+    scheduleBackendRefresh(refreshWakeSnapshot, 250);
     return res.json({ device: publicWakeDevice(device) });
   } catch (err) {
     return res.status(400).json({ error: err.message || 'Could not update device' });
@@ -2828,6 +3055,7 @@ app.delete('/api/wol/devices/:id', requireAuth, requireAdmin, (req, res) => {
   const nextDevices = devices.filter(device => device.id !== req.params.id);
   if (nextDevices.length === devices.length) return res.status(404).json({ error: 'Device not found' });
   writeWakeDevices(nextDevices);
+  scheduleBackendRefresh(refreshWakeSnapshot, 250);
   return res.json({ ok: true });
 });
 
@@ -2862,6 +3090,7 @@ app.post('/api/wol/devices/:id/wake', requireAuth, async (req, res) => {
       updatedAt,
     };
     writeWakeDevices(devices);
+    scheduleBackendRefresh(refreshWakeSnapshot, 250);
     appendWakeLog({ ...logBase, ok: true, attempts, status });
     return res.json({ ok: true, attempts, status, device: { ...publicWakeDevice(devices[index]), status } });
   } catch (err) {
@@ -2869,6 +3098,7 @@ app.post('/api/wol/devices/:id/wake', requireAuth, async (req, res) => {
     const attempts = Array.isArray(err.attempts) ? err.attempts : [];
     const status = await checkWakeDevice(device);
     appendWakeLog({ ...logBase, ok: false, error: err.message, attempts, status });
+    scheduleBackendRefresh(refreshWakeSnapshot, 250);
     return res.status(502).json({ error: `Could not send wake packet: ${err.message}`, attempts, status });
   }
 });
@@ -2885,6 +3115,7 @@ app.post('/api/sites', requireAuth, requireAdmin, (req, res) => {
     sites.push(site);
     writeSites(sites);
     invalidateSiteStatusCache();
+    scheduleBackendRefresh(refreshSiteChecksInBackground, 250);
     res.status(201).json({ site: publicSite(site) });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Could not create site' });
@@ -2900,6 +3131,7 @@ app.put('/api/sites/:id', requireAuth, requireAdmin, (req, res) => {
     sites[index] = site;
     writeSites(sites);
     invalidateSiteStatusCache();
+    scheduleBackendRefresh(refreshSiteChecksInBackground, 250);
     return res.json({ site: publicSite(site) });
   } catch (err) {
     return res.status(400).json({ error: err.message || 'Could not update site' });
@@ -2914,15 +3146,14 @@ app.delete('/api/sites/:id', requireAuth, requireAdmin, (req, res) => {
   rememberDeletedSiteSeed(removedSite);
   writeSites(nextSites);
   invalidateSiteStatusCache();
+  scheduleBackendRefresh(refreshSiteChecksInBackground, 250);
   return res.json({ ok: true });
 });
 
-app.get('/api/logs', requireAuth, async (_req, res) => {
-  const [nas, homeAssistant, unifi] = await Promise.all([
-    collectNasSnapshot().catch(err => ({ logs: [], error: err.message })),
-    collectHomeAssistant().catch(err => ({ logbook: [], errorLog: [], error: err.message })),
-    collectUniFi().catch(err => ({ events: [], alarms: [], error: err.message })),
-  ]);
+app.get('/api/logs', requireAuth, (_req, res) => {
+  const nas = getNasSnapshot();
+  const homeAssistant = getHomeAssistantSnapshot();
+  const unifi = getUniFiSnapshot();
   res.json({
     collectedAt: new Date().toISOString(),
     nas: nas.logs || [],
@@ -2950,4 +3181,5 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`[chempboard] ${APP_LABEL} running on port ${PORT}`);
+  startBackendPollers();
 });

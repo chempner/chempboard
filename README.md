@@ -38,11 +38,15 @@ Required environment:
 | `UNIFI_LOGIN_PATHS` | Login paths to try, defaults to UniFi OS then classic controller |
 | `UNIFI_API_PREFIXES` | API path prefixes to try, defaults to `/proxy/network` then classic root |
 | `STATUS_SITES` | JSON array used to seed additional Status checks |
-| `SITE_STATUS_CACHE_MS` | Status check cache window, defaults to `60000` |
+| `BACKGROUND_REFRESH_INTERVAL_MS` | Default backend poll interval for external integrations, clamped to 1-5 minutes and defaults to `300000` |
+| `STATUS_CHECK_INTERVAL_MS` | Status check poll interval override, clamped to 1-5 minutes |
+| `UNIFI_REFRESH_INTERVAL_MS` | UniFi poll interval override, clamped to 1-5 minutes |
+| `HOME_ASSISTANT_REFRESH_INTERVAL_MS` | Home Assistant poll interval override, clamped to 1-5 minutes |
+| `NAS_REFRESH_INTERVAL_MS` / `WAKE_REFRESH_INTERVAL_MS` | Local NAS/Wake poll intervals, clamped to 1-5 minutes and default to `60000` |
 
 Home Assistant uses its REST API for states, logbook, events, services, system health, and error log. UniFi uses the local Network application API style because it exposes the broadest status and log surface for a NAS-local dashboard; with a Site Manager API key, the UniFi page also asks the documented Site Manager `/v1/hosts` and `/v1/sites` endpoints so admins can choose between consoles even when every Network site is named `default`. Connected clients are collected from the official Network Integration `/v1/sites/{siteId}/clients` endpoint using the UUID returned by Network Integration `/v1/sites`; legacy endpoints such as `api/s/default/stat/sta` use the site's `internalReference` instead. If UniFi returns summary counts through Site Manager but does not return detailed client rows, ChempBoard shows the Site Manager client count clearly as summary-only data.
 
-The Status checks page automatically includes the Chempner Traefik hostnames from `*.chempner.ch` and merges any missing defaults into `DATA_DIR/sites.json` without replacing existing checks. Deleted seeded checks are remembered in `DATA_DIR/settings.json`, and status probes refresh in the background so page loads are not blocked by slow endpoints.
+The Status checks page automatically includes the Chempner Traefik hostnames from `*.chempner.ch` and merges any missing defaults into `DATA_DIR/sites.json` without replacing existing checks. Deleted seeded checks are remembered in `DATA_DIR/settings.json`. NAS, Wake, Home Assistant, UniFi, and Status snapshots are refreshed by backend timers; page loads only read the last snapshot and do not trigger integration probes.
 
 Admins can change NAS disk paths/log files, Home Assistant URL/token, UniFi URL/credentials/API key, and WOL defaults from the Settings page. Saved settings live in `DATA_DIR/settings.json` and override environment defaults without rebuilding the container.
 
