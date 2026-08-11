@@ -1899,6 +1899,12 @@ function looksLikeUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(asText(value, 180));
 }
 
+function usableNetworkSiteId(value) {
+  const text = asText(value, 180);
+  if (!text) return false;
+  return !['default', 'site', 'sites', 'unknown'].includes(text.toLowerCase());
+}
+
 function networkIntegrationSiteKey(site) {
   return asText(site?.id || site?._id || site?.siteId || site?.site_id || site?.name || site?.internalReference || '', 180);
 }
@@ -2703,10 +2709,10 @@ async function collectUniFi() {
     const matchedSites = siteRows.filter(siteMatchesSelection);
     const selectedSiteRows = matchedSites.length ? matchedSites : siteRows.length === 1 ? siteRows : [];
     const networkSiteIds = uniqueTextValues([
-      ...(looksLikeUuid(unifiSiteId) ? [unifiSiteId] : []),
+      ...(usableNetworkSiteId(unifiSiteId) ? [unifiSiteId] : []),
       ...selectedSiteRows.flatMap(networkIntegrationSiteIds),
       ...(selectedSiteRows.length ? [] : siteRows.flatMap(networkIntegrationSiteIds)),
-    ], 180).filter(looksLikeUuid);
+    ], 180).filter(usableNetworkSiteId);
     const legacySiteNames = uniqueTextValues([
       unifiSite,
       'default',
@@ -2718,7 +2724,7 @@ async function collectUniFi() {
       endpoints.push({
         name: 'network clients',
         ok: false,
-        error: 'Network sites were discovered, but no UUID site id was available for /v1/sites/{siteId}/clients',
+        error: 'Network sites were discovered, but no site id was available for /v1/sites/{siteId}/clients',
       });
     }
 
@@ -2788,7 +2794,7 @@ async function collectUniFi() {
     if (!apiKey || !unifiHostId) return { clients: [], endpoint: null };
     const siteNames = uniqueTextValues([unifiSite, 'default', ...extraSiteNames], 180)
       .filter(value => value && !looksLikeUuid(value));
-    const resources = ['stat/sta', 'stat/alluser', 'rest/user', 'list/user'];
+    const resources = ['stat/sta'];
     const endpoints = [];
     const emptySuccesses = [];
     let lastError = null;
