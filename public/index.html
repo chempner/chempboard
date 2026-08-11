@@ -1717,12 +1717,17 @@
       picker.disabled = true;
       showNotice('');
       try {
-        const saved = await api('/api/settings', {
-          method: 'PUT',
+        const saved = await api('/api/unifi/site', {
+          method: 'POST',
           body: JSON.stringify(nextSite),
         });
         state.settings = saved.settings;
-        await refreshDashboard({ quiet: true });
+        if (saved.dashboard) {
+          state.data = saved.dashboard;
+        } else if (saved.unifi) {
+          state.data = { ...state.data, unifi: saved.unifi };
+        }
+        render();
       } catch (error) {
         picker.value = previousKey;
         showNotice(error.message);

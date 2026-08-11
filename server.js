@@ -45,10 +45,10 @@ const LOG_LINE_LIMIT = clampInt(process.env.LOG_LINE_LIMIT, 120, 20, 500);
 let siteStatusCache = null;
 let siteStatusRefreshPromise = null;
 const backgroundSnapshots = {
-  nas: { cache: null, promise: null, intervalMs: NAS_REFRESH_INTERVAL_MS },
-  wake: { cache: null, promise: null, intervalMs: WAKE_REFRESH_INTERVAL_MS },
-  homeAssistant: { cache: null, promise: null, intervalMs: HOME_ASSISTANT_REFRESH_INTERVAL_MS },
-  unifi: { cache: null, promise: null, intervalMs: UNIFI_REFRESH_INTERVAL_MS },
+  nas: { cache: null, promise: null, intervalMs: NAS_REFRESH_INTERVAL_MS, version: 0 },
+  wake: { cache: null, promise: null, intervalMs: WAKE_REFRESH_INTERVAL_MS, version: 0 },
+  homeAssistant: { cache: null, promise: null, intervalMs: HOME_ASSISTANT_REFRESH_INTERVAL_MS, version: 0 },
+  unifi: { cache: null, promise: null, intervalMs: UNIFI_REFRESH_INTERVAL_MS, version: 0 },
 };
 const CHEMPNER_TRAEFIK_STATUS_SITES = [
   { name: 'AdGuard', url: 'https://adguard.chempner.ch', group: 'Network', kind: 'dns', tags: ['traefik'] },
@@ -2726,8 +2726,9 @@ function fallbackWakeSnapshot() {
   };
 }
 
-function cacheBackgroundSnapshot(key, snapshot) {
+function cacheBackgroundSnapshot(key, snapshot, version = backgroundSnapshots[key]?.version) {
   const state = backgroundSnapshots[key];
+  if (!state || version !== state.version) return getBackgroundSnapshot(key);
   const collectedAt = snapshot?.collectedAt || new Date().toISOString();
   state.cache = {
     snapshot: { ...snapshot, collectedAt },
@@ -2753,12 +2754,41 @@ function getBackgroundSnapshot(key, fallbackFactory = () => ({})) {
   };
 }
 
+function invalidateBackgroundSnapshot(key) {
+  const state = backgroundSnapshots[key];
+  if (!state) return;
+  state.version += 1;
+  state.cache = null;
+  state.promise = null;
+}
+
+function invalidateSnapshotsForSettings(raw = {}) {
+  const keys = new Set(Object.keys(raw || {}));
+  const touches = names => names.some(name => keys.has(name));
+  if (touches(['nasPublicUrl', 'nasDiskPaths', 'nasLogFiles'])) {
+    invalidateBackgroundSnapshot('nas');
+  }
+  if (touches(['homeAssistantUrl', 'homeAssistantToken', 'clearHomeAssistantToken', 'haLogbookHours'])) {
+    invalidateBackgroundSnapshot('homeAssistant');
+  }
+  if (touches(['unifiUrl', 'unifiUsername', 'unifiPassword', 'clearUnifiPassword', 'unifiApiKey', 'clearUnifiApiKey', 'unifiSite', 'unifiHostId', 'unifiSiteId', 'unifiInsecure', 'unifiLoginPaths', 'unifiApiPrefixes'])) {
+    invalidateBackgroundSnapshot('unifi');
+  }
+  if (touches(['wolDefaultBroadcast', 'wolDefaultPort', 'wolExtraBroadcasts', 'wolRepeatCount', 'wolBindAddress', 'wolBindPort'])) {
+    invalidateBackgroundSnapshot('wake');
+  }
+  if (touches(['nasPublicUrl', 'homeAssistantUrl', 'unifiUrl'])) {
+    invalidateSiteStatusCache();
+  }
+}
+
 function refreshBackgroundSnapshot(key, collector, fallbackFactory) {
   const state = backgroundSnapshots[key];
   if (state.promise) return state.promise;
+  const version = state.version;
   state.promise = Promise.resolve()
     .then(collector)
-    .then(snapshot => cacheBackgroundSnapshot(key, snapshot))
+    .then(snapshot => cacheBackgroundSnapshot(key, snapshot, version))
     .catch(err => {
       console.warn(`[refresh] ${key} refresh failed: ${err.message}`);
       const existing = state.cache?.snapshot || fallbackFactory();
@@ -2767,10 +2797,10 @@ function refreshBackgroundSnapshot(key, collector, fallbackFactory) {
         ok: false,
         error: err.message,
         collectedAt: new Date().toISOString(),
-      });
+      }, version);
     })
     .finally(() => {
-      state.promise = null;
+      if (state.version === version) state.promise = null;
     });
   return state.promise;
 }
@@ -2985,7 +3015,9 @@ app.get('/api/settings', requireAuth, requireAdmin, (_req, res) => {
 
 app.put('/api/settings', requireAuth, requireAdmin, (req, res) => {
   try {
+    const raw = req.body || {};
     const settings = updateSettings(req.body || {});
+    invalidateSnapshotsForSettings(raw);
     scheduleAllBackendRefreshes(250);
     res.json({ settings });
   } catch (err) {
@@ -3007,6 +3039,23 @@ app.get('/api/home-assistant', requireAuth, (_req, res) => {
 
 app.get('/api/unifi', requireAuth, (_req, res) => {
   res.json(getUniFiSnapshot());
+});
+
+app.post('/api/unifi/site', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const payload = {
+      unifiSite: req.body?.unifiSite,
+      unifiHostId: req.body?.unifiHostId,
+      unifiSiteId: req.body?.unifiSiteId,
+    };
+    const settings = updateSettings(payload);
+    invalidateBackgroundSnapshot('unifi');
+    const unifi = await refreshUniFiSnapshot();
+    const dashboard = await collectDashboard();
+    res.json({ settings, unifi, dashboard });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Could not switch UniFi site' });
+  }
 });
 
 app.get('/api/sites', requireAuth, (_req, res) => {
